@@ -89,7 +89,9 @@ final class PermissionFlow: NSObject, CLLocationManagerDelegate {
         }
     }
 
-    func openSettings() {
+    /// Static: opening the app's settings page needs none of the flow's state (no location manager),
+    /// so it can run before `Bubbl.start`.
+    static func openSettings() {
         guard let url = URL(string: UIApplication.openSettingsURLString) else { return }
         UIApplication.shared.open(url)
     }

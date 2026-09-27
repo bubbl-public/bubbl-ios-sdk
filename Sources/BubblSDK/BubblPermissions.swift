@@ -66,7 +66,9 @@ public struct BubblPermissions: Sendable {
         }
     }
 
-    /// The app's page in the system's Settings.
+    /// The app's page in the system's Settings, for a permission the user refused (one of the app's
+    /// own, like the camera, too). Works before `Bubbl.start`: it needs nothing of Bubbl's. Opens on
+    /// the main thread, whichever thread this is called from.
     public func openSettings() {
         Bubbl.backend.openSettings()
     }

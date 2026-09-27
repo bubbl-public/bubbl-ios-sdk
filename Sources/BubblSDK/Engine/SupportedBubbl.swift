@@ -229,9 +229,11 @@ struct SupportedBubbl: BubblBackend {
         #endif
     }
 
+    /// No engine needed, so no `start` check: an app can send the user to its settings page before
+    /// starting Bubbl.
     func openSettings() {
         #if os(iOS)
-        Task { @MainActor in PermissionFlow.shared.openSettings() }
+        Task { @MainActor in PermissionFlow.openSettings() }
         #endif
     }
 

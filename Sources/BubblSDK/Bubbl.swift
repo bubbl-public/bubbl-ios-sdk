@@ -12,8 +12,8 @@ import BubblCore
 ///
 ///     Bubbl.start(apiKey: "pk_live_…", options: BubblOptions(baseUrl: "https://…"))
 ///
-/// Every call is safe from any thread. Calls before `start` do nothing (and log a warning). Bubbl
-/// never stops the app: a mistake (an empty key, an http:// URL) is logged, not thrown.
+/// Every call is safe from any thread. Calls before `start` do nothing (and log a warning), except
+/// `permissions.openSettings()`, which needs nothing of Bubbl's. Bubbl never stops the app: a mistake (an empty key, an http:// URL) is logged, not thrown.
 ///
 /// Bubbl works on iOS 17 and later. An app supporting older versions can still include it: on
 /// those phones `isSupported` is false and every call does nothing (see `isSupported`).
