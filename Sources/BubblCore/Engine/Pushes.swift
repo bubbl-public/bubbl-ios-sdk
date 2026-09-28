@@ -28,7 +28,7 @@ extension EngineCore {
         switch message {
         case .test(let title, let body):
             return .test(title: title, body: body)
-        case .unsupported:
+        case .syncGeofences, .unsupported:
             return .nothing
         case .full(_, let notification):
             return await notificationArrived(notification, opened: opened)

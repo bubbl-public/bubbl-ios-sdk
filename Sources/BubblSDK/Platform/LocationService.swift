@@ -196,7 +196,7 @@ final class LocationService: NSObject, CLLocationManagerDelegate {
         }
 
         oneShot.desiredAccuracy = precise ? kCLLocationAccuracyBest : kCLLocationAccuracyHundredMeters
-        return await withCheckedContinuation { continuation in
+        let fresh: Fix? = await withCheckedContinuation { continuation in
             waiting.append(continuation)
             guard waiting.count == 1 else { return }
             fixRequest += 1
@@ -207,6 +207,16 @@ final class LocationService: NSObject, CLLocationManagerDelegate {
                 if self.fixRequest == request { self.deliver(nil) }
             }
         }
+        if let fresh { return fresh }
+
+        // When a fresh fix couldn't be obtained in time (e.g. indoors or during a background wake-up),
+        // fall back to the most recent cached location if available, as Android does with fused.lastLocation.
+        let candidates = [oneShot.location, inUse.location, changes.location].compactMap { $0 }
+        if let mostRecent = candidates.max(by: { $0.timestamp < $1.timestamp }) {
+            BubblLog.debug("Geofence check: using cached location from \(-Int(mostRecent.timestamp.timeIntervalSinceNow))s ago")
+            return Fix(mostRecent)
+        }
+        return nil
     }
 
     /// While the app is open and iOS isn't watching the geofences: fixes every 20 m or so.

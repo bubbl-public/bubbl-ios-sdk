@@ -1,4 +1,7 @@
 import Foundation
+#if canImport(UIKit)
+import UIKit
+#endif
 #if canImport(UserNotifications)
 import UserNotifications
 #endif
@@ -151,4 +154,33 @@ extension EngineHost {
             break
         }
     }
+
+    #if os(iOS)
+    /// A remote notification arrived via application(_:didReceiveRemoteNotification:fetchCompletionHandler:).
+    /// Returns the UIBackgroundFetchResult to hand iOS's completion handler.
+    func receivedRemoteNotification(_ data: [String: JSONValue]) async -> UIBackgroundFetchResult {
+        if current == nil {
+            applicationDidFinishLaunching()
+        }
+        guard let core = current, core.isActive else { return .noData }
+
+        guard let message = PushMessage.parse(data) else { return .noData }
+        switch message {
+        case .syncGeofences:
+            BubblLog.info("Silent push received: syncing geofences")
+            let outcome = await runCheck(core, force: true, precise: false, rewatch: false, fix: nil)
+            switch outcome {
+            case .done:
+                return .newData
+            case .retry:
+                return .failed
+            }
+        case .full, .reference:
+            _ = await presentation(forArriving: data)
+            return .newData
+        case .test, .unsupported:
+            return .noData
+        }
+    }
+    #endif
 }

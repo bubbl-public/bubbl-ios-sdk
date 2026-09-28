@@ -208,6 +208,10 @@ struct SupportedBubbl: BubblBackend {
     func didReceive(_ response: UNNotificationResponse, completionHandler: @escaping () -> Void) -> Bool {
         NotificationDelegateHooks.didReceive(response, completionHandler)
     }
+
+    func didReceiveRemoteNotification(_ userInfo: [AnyHashable: Any], completionHandler: @escaping (UIBackgroundFetchResult) -> Void) -> Bool {
+        PushIntegration.didReceiveRemoteNotification(userInfo, completionHandler)
+    }
     #endif
 
     // MARK: - Permissions

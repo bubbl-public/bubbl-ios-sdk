@@ -11,12 +11,14 @@ package enum PushMessage: Sendable, Equatable {
     case reference(campaignNotificationId: String)
     /// A dashboard test push: no campaign behind it, so nothing to fetch or report.
     case test(title: String, body: String)
+    /// A silent push asking the SDK to sync geofences in the background.
+    case syncGeofences
     /// Bubbl's, but not something this SDK can show (a newer format): not the app's to handle either.
     case unsupported(version: String)
 
     package static let version = "1"
     /// The data keys a Bubbl push carries (push.json).
-    package static let keys = ["bubbl", "bubbl_v", "campaign_notification_id", "notification", "test", "title", "body", "image_url"]
+    package static let keys = ["bubbl", "bubbl_v", "action", "campaign_notification_id", "notification", "test", "title", "body", "image_url"]
 
     /// The picture for the system notification (image_url), for the notification service
     /// extension: there even when the notification itself was too big to come in the push. Only
@@ -42,6 +44,9 @@ package enum PushMessage: Sendable, Equatable {
         guard version == Self.version else {
             BubblLog.warning("A push in data format \(version) was left alone: this SDK reads format \(Self.version)")
             return .unsupported(version: version)
+        }
+        if data["action"]?.stringValue == "sync_geofences" {
+            return .syncGeofences
         }
         if isSet(data["test"]) {
             return .test(title: data["title"]?.stringValue ?? "", body: data["body"]?.stringValue ?? "")

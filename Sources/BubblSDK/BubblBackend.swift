@@ -1,5 +1,8 @@
 import Foundation
 import os
+#if canImport(UIKit)
+import UIKit
+#endif
 #if canImport(UserNotifications)
 import UserNotifications
 #endif
@@ -40,6 +43,7 @@ protocol BubblBackend: Sendable {
     func setPushToken(_ deviceToken: Data)
     func willPresent(_ notification: UNNotification, completionHandler: @escaping (UNNotificationPresentationOptions) -> Void) -> Bool
     func didReceive(_ response: UNNotificationResponse, completionHandler: @escaping () -> Void) -> Bool
+    func didReceiveRemoteNotification(_ userInfo: [AnyHashable: Any], completionHandler: @escaping (UIBackgroundFetchResult) -> Void) -> Bool
     #endif
 
     func permissionStatus() -> BubblPermissionStatus?
@@ -94,6 +98,7 @@ struct UnsupportedBubbl: BubblBackend {
     func setPushToken(_ deviceToken: Data) {}
     func willPresent(_ notification: UNNotification, completionHandler: @escaping (UNNotificationPresentationOptions) -> Void) -> Bool { false }
     func didReceive(_ response: UNNotificationResponse, completionHandler: @escaping () -> Void) -> Bool { false }
+    func didReceiveRemoteNotification(_ userInfo: [AnyHashable: Any], completionHandler: @escaping (UIBackgroundFetchResult) -> Void) -> Bool { false }
     #endif
 
     func permissionStatus() -> BubblPermissionStatus? { nil }

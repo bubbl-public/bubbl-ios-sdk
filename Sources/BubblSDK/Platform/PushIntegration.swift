@@ -80,6 +80,18 @@ enum PushIntegration {
             await MainActor.run { UIApplication.shared.registerForRemoteNotifications() }
         }
     }
+
+    /// Bubbl answers for a remote notification (e.g. background geofence sync push); false when it isn't Bubbl's.
+    static func didReceiveRemoteNotification(_ userInfo: [AnyHashable: Any], _ completion: @escaping (UIBackgroundFetchResult) -> Void) -> Bool {
+        let data = EngineHost.pushData(userInfo)
+        guard PushMessage.isBubbl(data) else { return false }
+        let done = Handed(completion)
+        Task { @MainActor in
+            let result = await EngineHost.shared.receivedRemoteNotification(data)
+            done.value(result)
+        }
+        return true
+    }
 }
 
 // MARK: - The app delegate's token callbacks
@@ -88,6 +100,7 @@ enum PushIntegration {
 enum AppDelegateHooks {
     private typealias DidRegister = @convention(c) (AnyObject, Selector, UIApplication, NSData) -> Void
     private typealias DidFail = @convention(c) (AnyObject, Selector, UIApplication, NSError) -> Void
+    private typealias DidReceiveRemote = @convention(c) (AnyObject, Selector, UIApplication, NSDictionary, @escaping @convention(block) (UIBackgroundFetchResult) -> Void) -> Void
 
     @MainActor
     static func install() {
@@ -119,6 +132,29 @@ enum AppDelegateHooks {
                     unsafeBitCast(original, to: DidFail.self)(this, didFail, application, error)
                 } else if let target = Swizzle.forwardee(this, didFail) {
                     _ = target.perform(didFail, with: application, with: error)
+                }
+            }
+            return block
+        }
+
+        let didReceiveRemote = #selector(UIApplicationDelegate.application(_:didReceiveRemoteNotification:fetchCompletionHandler:))
+        Swizzle.extend(cls, didReceiveRemote, types: "v@:@@@?") { original in
+            let block: @convention(block) (AnyObject, UIApplication, NSDictionary, @escaping @convention(block) (UIBackgroundFetchResult) -> Void) -> Void = { this, application, userInfo, completion in
+                let dict = userInfo as? [AnyHashable: Any] ?? [:]
+                if PushIntegration.didReceiveRemoteNotification(dict, completion) { return }
+                if let original {
+                    unsafeBitCast(original, to: DidReceiveRemote.self)(this, didReceiveRemote, application, userInfo, completion)
+                } else if let target = Swizzle.forwardee(this, didReceiveRemote) {
+                    if let delegate = target as? UIApplicationDelegate {
+                        delegate.application?(application, didReceiveRemoteNotification: dict, fetchCompletionHandler: completion)
+                    } else if let method = class_getInstanceMethod(object_getClass(target), didReceiveRemote) {
+                        let imp = method_getImplementation(method)
+                        unsafeBitCast(imp, to: DidReceiveRemote.self)(target, didReceiveRemote, application, userInfo, completion)
+                    } else {
+                        completion(.noData)
+                    }
+                } else {
+                    completion(.noData)
                 }
             }
             return block

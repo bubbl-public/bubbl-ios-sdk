@@ -1,4 +1,7 @@
 import Foundation
+#if canImport(UIKit)
+import UIKit
+#endif
 #if canImport(UserNotifications)
 import UserNotifications
 #endif
@@ -221,6 +224,14 @@ public enum Bubbl {
     /// isn't.
     public static func didReceive(_ response: UNNotificationResponse, completionHandler: @escaping () -> Void) -> Bool {
         backend.didReceive(response, completionHandler: completionHandler)
+    }
+
+    /// From the app delegate's `application(_:didReceiveRemoteNotification:fetchCompletionHandler:)`:
+    /// true when the remote notification is Bubbl's, and Bubbl calls `completionHandler`; false when it
+    /// isn't.
+    @discardableResult
+    public static func didReceiveRemoteNotification(_ userInfo: [AnyHashable: Any], completionHandler: @escaping (UIBackgroundFetchResult) -> Void) -> Bool {
+        backend.didReceiveRemoteNotification(userInfo, completionHandler: completionHandler)
     }
     #endif
 
