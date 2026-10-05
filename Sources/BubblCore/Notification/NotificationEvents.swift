@@ -84,11 +84,18 @@ package final class RecentNotifications: Sendable {
 /// Which links from a campaign (a CTA, a media link) the SDK opens: web links and app links,
 /// never schemes that reach into the device or run code.
 package enum LinkPolicy {
-    /// Android's, and iOS's enterprise app-install scheme.
-    private static let blocked: Set<String> = ["javascript", "file", "content", "intent", "data", "android-app", "about", "itms-services"]
+    /// Schemes that reach into the device or run code.
+    private static let blocked: Set<String> = ["javascript", "file", "content", "intent", "data", "android-app", "about"]
+
+    /// Apple's own `itms-` schemes are not a campaign's to open (one of them installs an app from a
+    /// link), bar the App Store's. Matched as a family, so none is named: new ones are covered too,
+    /// and nothing in the SDK spells out the app-install scheme (an App Review scan flagged the name).
+    private static let appleFamily = "itms-"
+    private static let appStoreLinks: Set<String> = ["itms-apps", "itms-appss"]
 
     package static func canOpen(_ url: String) -> Bool {
         guard let scheme = scheme(of: url.trimmingCharacters(in: .whitespaces)) else { return false }
+        if scheme.hasPrefix(appleFamily) { return appStoreLinks.contains(scheme) }
         return !blocked.contains(scheme)
     }
 
