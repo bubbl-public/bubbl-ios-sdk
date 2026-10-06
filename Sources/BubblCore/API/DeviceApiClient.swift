@@ -34,6 +34,7 @@ package final class DeviceApiClient: Sendable {
     private let installBody: @Sendable () throws -> [String: Any]
     private let onRegistered: @Sendable ([String: Any]) -> Void
     private let registration = AsyncMutex()
+    private let serverErrors = ServerErrorStreak()
 
     /// - Parameters:
     ///   - installBody: what POST /installs sends (api_key is added here): the install id the SDK
@@ -211,6 +212,8 @@ package final class DeviceApiClient: Sendable {
         clock.sync(dateHeader: response.header("Date"))
         let result = ApiResponse(response)
         if let said = Self.wrongEnvironment(result) { BubblLog.error(said) }
+        let path = String((URLComponents(string: request.url)?.percentEncodedPath ?? "").drop { $0 == "/" })
+        if let said = serverErrors.record(status: response.status, method: request.method, path: path) { BubblLog.error(said) }
         return result
     }
 
