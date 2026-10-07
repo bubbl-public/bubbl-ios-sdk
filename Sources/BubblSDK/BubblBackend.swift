@@ -28,6 +28,8 @@ protocol BubblBackend: Sendable {
     func registerTestDevice(_ code: String) async -> BubblTestDeviceResult
 
     func setSegments(_ segments: [String])
+    func setCorrelationId(_ id: String)
+    func clearCorrelationId()
     func track(_ name: String, properties: [String: Any?])
 
     func setNotificationListener(_ listener: (@MainActor @Sendable (BubblMessage) -> Bool)?)
@@ -81,6 +83,8 @@ struct UnsupportedBubbl: BubblBackend {
     }
 
     func setSegments(_ segments: [String]) {}
+    func setCorrelationId(_ id: String) {}
+    func clearCorrelationId() {}
     func track(_ name: String, properties: [String: Any?]) {}
 
     func setNotificationListener(_ listener: (@MainActor @Sendable (BubblMessage) -> Bool)?) {}

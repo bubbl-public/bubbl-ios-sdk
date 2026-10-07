@@ -34,6 +34,9 @@ extension EngineCore {
         let wasActive = privacy.state?.active == true
         try privacy.update { $0.consent = false }
         await stopWork()
+        // The server clears the correlation id when consent is withdrawn and drops one sent while
+        // it is: forget that it has ours, so the sync after consent is given again sends it too.
+        await deviceSync.forget([CorrelationId.key])
         return wasActive
     }
 
@@ -128,6 +131,7 @@ extension EngineCore {
         try await geofences.stop()
         try configSync.forget()
         try segments.forget()
+        try correlation.forget()
         deviceSync.forget()
         try stores.recentNotifications.delete()
         try stores.installId.delete()

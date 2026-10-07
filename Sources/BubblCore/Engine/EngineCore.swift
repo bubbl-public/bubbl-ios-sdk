@@ -88,6 +88,7 @@ package struct EngineStores: Sendable {
     package let config: any ValueStore<ConfigSync.Saved>
     package let deviceAcknowledged: any ValueStore<[String: JSONValue]>
     package let segments: any ValueStore<Segments.Saved>
+    package let correlation: any ValueStore<CorrelationId.Saved>
     package let privacy: any ValueStore<PrivacyState>
     package let recentNotifications: any ValueStore<[String]>
     package let installId: any ValueStore<String>
@@ -105,8 +106,10 @@ package struct EngineStores: Sendable {
         segments: any ValueStore<Segments.Saved>, privacy: any ValueStore<PrivacyState>,
         recentNotifications: any ValueStore<[String]>, installId: any ValueStore<String>,
         clockOffset: any ValueStore<Int64>, pausedUntil: any ValueStore<Int64>,
-        transitions: any ValueStore<[Transition]>, lockedDrops: any ValueStore<Int>
+        transitions: any ValueStore<[Transition]>, lockedDrops: any ValueStore<Int>,
+        correlation: any ValueStore<CorrelationId.Saved> = InMemoryValueStore()
     ) {
+        self.correlation = correlation
         self.credentials = credentials
         self.events = events
         self.geofenceState = geofenceState
@@ -151,7 +154,8 @@ package struct EngineStores: Sendable {
             clockOffset: FileValueStore(url: url("clock_offset.json"), writeOptions: writeOptions),
             pausedUntil: FileValueStore(url: url("paused_until.json"), writeOptions: writeOptions),
             transitions: FileValueStore(url: url("transitions.json"), writeOptions: writeOptions),
-            lockedDrops: FileValueStore(url: url("locked_drops.json"), writeOptions: writeOptions)
+            lockedDrops: FileValueStore(url: url("locked_drops.json"), writeOptions: writeOptions),
+            correlation: FileValueStore(url: url("correlation.json"), writeOptions: writeOptions)
         )
     }
 }
@@ -184,6 +188,7 @@ package final class EngineCore: Sendable {
     package let configSync: ConfigSync
     package let deviceSync: DeviceSync
     package let segments: Segments
+    package let correlation: CorrelationId
     package let events: EventQueue
     package let geofences: GeofenceEngine
     package let notifications: NotificationSource
@@ -282,6 +287,7 @@ package final class EngineCore: Sendable {
         self.hooks = hooks
         deviceSync = DeviceSync(api: api, acknowledged: stores.deviceAcknowledged)
         segments = Segments(store: stores.segments)
+        correlation = CorrelationId(store: stores.correlation)
         events = EventQueue(store: stores.events, api: api, clock: clock, batchSize: { configSync.current?.maxEventsPerRequest ?? EventQueue.batchSize })
         geofences = GeofenceEngine(api: api, clock: clock, store: stores.geofenceState, monitor: monitor)
         notifications = NotificationSource(api: api)
@@ -344,6 +350,7 @@ package final class EngineCore: Sendable {
         }
         if let permissions = platform.permissions() { attributes["permissions"] = permissions }
         if let consent = privacy.state?.consent { attributes["consent"] = .bool(consent) }
+        correlation.apply(to: &attributes)
         return attributes
     }
 

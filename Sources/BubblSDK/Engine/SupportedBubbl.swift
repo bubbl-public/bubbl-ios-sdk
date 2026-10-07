@@ -114,6 +114,28 @@ struct SupportedBubbl: BubblBackend {
         }
     }
 
+    func setCorrelationId(_ id: String) {
+        guard let core = started("setCorrelationId") else { return }
+        guard CorrelationId.isValid(id) else {
+            BubblLog.warning("Bubbl.setCorrelationId: the id must be 1 to \(CorrelationId.maxLength) characters, and not blank; ignored")
+            return
+        }
+        do {
+            if try core.correlation.set(id) { EngineHost.shared.submit("device") { await $0.syncDevice() } }
+        } catch {
+            BubblLog.warning("Bubbl.setCorrelationId: it can't be saved until the device is unlocked")
+        }
+    }
+
+    func clearCorrelationId() {
+        guard let core = started("clearCorrelationId") else { return }
+        do {
+            if try core.correlation.clear() { EngineHost.shared.submit("device") { await $0.syncDevice() } }
+        } catch {
+            BubblLog.warning("Bubbl.clearCorrelationId: it can't be saved until the device is unlocked")
+        }
+    }
+
     func track(_ name: String, properties: [String: Any?]) {
         guard let core = started("track") else { return }
         var converted: [String: JSONValue] = [:]

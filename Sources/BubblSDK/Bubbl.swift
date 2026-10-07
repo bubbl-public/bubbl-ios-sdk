@@ -115,6 +115,23 @@ public enum Bubbl {
         backend.setSegments(segments)
     }
 
+    /// Your own id for the person using this device (a member or CRM id), so Bubbl's reports and
+    /// exports can be joined to your records. Send an opaque id, never an email address or a name.
+    /// It replaces any set before, is kept between launches and goes to Bubbl with the next device
+    /// sync. Not unique: the same id may be set on several devices (one person's phone and
+    /// tablet). `id` is sent as it is, never trimmed or lowercased, so Bubbl's search and your
+    /// join see exactly what you set. Blank, or longer than 255 characters, is ignored with a
+    /// warning. Call `clearCorrelationId()` when the person signs out, and call this again after
+    /// `deleteMyData()` or a start that began afresh (they forget it with everything else).
+    public static func setCorrelationId(_ id: String) {
+        backend.setCorrelationId(id)
+    }
+
+    /// Forgets the id set with `setCorrelationId(_:)`, here and at Bubbl (the person signed out).
+    public static func clearCorrelationId() {
+        backend.clearCorrelationId()
+    }
+
     /// Record an event of the app's own, for reports: a `name` of letters, digits and . _ : - (at
     /// most 100), and up to 50 flat `properties` (text, numbers, true/false or nil).
     public static func track(_ name: String, properties: [String: Any?] = [:]) {
