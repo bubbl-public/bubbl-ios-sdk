@@ -12,11 +12,21 @@ import BubblCore
 @available(iOS 17, *)
 struct ScreenPresenter: NotificationPresenting {
     func present(_ notification: JSONValue, opened: Bool) async -> Bool {
+        await present(notification, opened: opened, region: nil)
+    }
+
+    func present(_ notification: JSONValue, opened: Bool, region: BubblPresentationRegion?) async -> Bool {
+        await present(notification, opened: opened, region: region, preview: false)
+    }
+
+    func present(_ notification: JSONValue, opened: Bool, region: BubblPresentationRegion?, preview: Bool) async -> Bool {
         guard let parsed = BubblNotification(notification) else { return false }
         let inFront = await MainActor.run { UIApplication.shared.applicationState != .background }
         if opened || inFront {
-            return await MainActor.run { NotificationScreens.shared.show(parsed, opened: opened) }
+            return await MainActor.run { NotificationScreens.shared.show(parsed, opened: opened, region: region, preview: preview) }
         }
+        // A preview is only ever shown on screen: no system notification, no delivery event.
+        if preview { return false }
         return await SystemNotifications.post(parsed)
     }
 }
@@ -31,23 +41,24 @@ final class NotificationScreens {
     private var window: UIWindow?
     private weak var previousKeyWindow: UIWindow?
     private var showing: String?
-    private var waiting: [(notification: BubblNotification, opened: Bool)] = []
+    private var model: NotificationModel?
+    private var waiting: [(notification: BubblNotification, opened: Bool, region: BubblPresentationRegion?, preview: Bool)] = []
     private var watchingScenes = false
 
-    func show(_ notification: BubblNotification, opened: Bool) -> Bool {
+    func show(_ notification: BubblNotification, opened: Bool, region: BubblPresentationRegion? = nil, preview: Bool = false) -> Bool {
         let id = notification.campaignNotificationId
         guard showing != id, !waiting.contains(where: { $0.notification.campaignNotificationId == id }) else { return true }
         guard window == nil, let scene = activeScene() else {
-            waiting.append((notification, opened))
+            waiting.append((notification, opened, region, preview))
             watchScenes()
             return true
         }
 
-        let events = EngineHost.shared.current.map(EngineHost.shared.notificationEvents)
+        let events = EngineHost.shared.current.map(EngineHost.shared.notificationEvents).map { preview ? $0.asPreview() : $0 }
         let model = NotificationModel(notification: notification, opened: opened, events: events) { [weak self] in
             self?.closeCurrent()
         }
-        let host = UIHostingController(rootView: NotificationScreen(model: model))
+        let host = UIHostingController(rootView: NotificationScreen(model: model, region: region))
         host.view.backgroundColor = .clear
 
         let window = UIWindow(windowScene: scene)
@@ -56,13 +67,20 @@ final class NotificationScreens {
         previousKeyWindow = scene.windows.first { $0.isKeyWindow }
         window.makeKeyAndVisible()
         self.window = window
+        self.model = model
         showing = id
         return true
+    }
+
+    /// Closes the screen showing, if any, as its close button does (the dismissal reported).
+    func dismissCurrent() {
+        model?.dismiss()
     }
 
     private func closeCurrent() {
         window?.isHidden = true
         window = nil
+        model = nil
         showing = nil
         previousKeyWindow?.makeKey()
         showNext()
@@ -71,7 +89,7 @@ final class NotificationScreens {
     private func showNext() {
         guard window == nil, !waiting.isEmpty, activeScene() != nil else { return }
         let next = waiting.removeFirst()
-        _ = show(next.notification, opened: next.opened)
+        _ = show(next.notification, opened: next.opened, region: next.region, preview: next.preview)
     }
 
     private func activeScene() -> UIWindowScene? {

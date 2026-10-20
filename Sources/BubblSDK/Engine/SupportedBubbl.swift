@@ -170,6 +170,22 @@ struct SupportedBubbl: BubblBackend {
         Task { _ = await EngineHost.shared.presenter.present(message.notification.json, opened: false) }
     }
 
+    func present(_ message: BubblMessage, region: BubblPresentationRegion) {
+        guard started("present") != nil else { return }
+        Task { _ = await EngineHost.shared.presenter.present(message.notification.json, opened: false, region: region) }
+    }
+
+    func present(_ message: BubblMessage, region: BubblPresentationRegion?, preview: Bool) {
+        guard started("present") != nil else { return }
+        Task { _ = await EngineHost.shared.presenter.present(message.notification.json, opened: false, region: region, preview: preview) }
+    }
+
+    func dismissPresented() {
+        #if os(iOS)
+        Task { @MainActor in NotificationScreens.shared.dismissCurrent() }
+        #endif
+    }
+
     /// Records a notification event the app reports (and tells its event listeners), then sends
     /// the queue.
     func report(_ call: String, _ record: @escaping @Sendable (NotificationEvents) async throws -> Void) {

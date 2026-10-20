@@ -11,8 +11,18 @@ import BubblCore
 @available(iOS 17, *)
 struct NotificationScreen: View {
     @ObservedObject var model: NotificationModel
+    /// Where the card goes; the whole screen when nil.
+    var region: BubblPresentationRegion?
 
     var body: some View {
+        if let region {
+            regional(region)
+        } else {
+            fullScreen
+        }
+    }
+
+    private var fullScreen: some View {
         GeometryReader { proxy in
             ZStack {
                 Look.scrim.ignoresSafeArea()
@@ -28,6 +38,40 @@ struct NotificationScreen: View {
         }
         .onAppear { model.appear() }
         .accessibilityAddTraits(.isModal)
+    }
+
+    /// The card centred in the screen less the region's insets, which are from the screen's own
+    /// edges (the safe area ignored); the scrim still covers it all.
+    private func regional(_ region: BubblPresentationRegion) -> some View {
+        GeometryReader { proxy in
+            let width = max(proxy.size.width - region.leading - region.trailing, 0)
+            let height = max(proxy.size.height - region.top - region.bottom, 0)
+            ZStack(alignment: .topLeading) {
+                scrim(region)
+                ScrollView {
+                    card
+                        .frame(maxWidth: region.maxWidth ?? Look.cardMaxWidth)
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 24)
+                        .frame(maxWidth: .infinity, minHeight: height)
+                }
+                .scrollDismissesKeyboard(.interactively)
+                .frame(width: width, height: height)
+                .offset(x: region.leading, y: region.top)
+            }
+        }
+        .ignoresSafeArea()
+        .onAppear { model.appear() }
+        .accessibilityAddTraits(.isModal)
+    }
+
+    @ViewBuilder
+    private func scrim(_ region: BubblPresentationRegion) -> some View {
+        if let opacity = region.scrimOpacity {
+            Color.black.opacity(min(max(opacity, 0), 1)).ignoresSafeArea()
+        } else {
+            Look.scrim.ignoresSafeArea()
+        }
     }
 
     private var notification: BubblNotification { model.notification }

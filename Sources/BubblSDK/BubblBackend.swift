@@ -36,6 +36,9 @@ protocol BubblBackend: Sendable {
     func addEventListener(_ listener: @escaping @MainActor @Sendable (BubblEvent) -> Void) -> BubblEventToken
     func removeEventListener(_ token: BubblEventToken)
     func present(_ message: BubblMessage)
+    func present(_ message: BubblMessage, region: BubblPresentationRegion)
+    func present(_ message: BubblMessage, region: BubblPresentationRegion?, preview: Bool)
+    func dismissPresented()
     func report(_ call: String, _ record: @escaping @Sendable (NotificationEvents) async throws -> Void)
     func submitSurvey(_ message: BubblMessage, answers: [String: Any?]) -> Bool
     func openCta(_ message: BubblMessage)
@@ -93,6 +96,9 @@ struct UnsupportedBubbl: BubblBackend {
     }
     func removeEventListener(_ token: BubblEventToken) {}
     func present(_ message: BubblMessage) {}
+    func present(_ message: BubblMessage, region: BubblPresentationRegion) {}
+    func present(_ message: BubblMessage, region: BubblPresentationRegion?, preview: Bool) {}
+    func dismissPresented() {}
     func report(_ call: String, _ record: @escaping @Sendable (NotificationEvents) async throws -> Void) {}
     func submitSurvey(_ message: BubblMessage, answers: [String: Any?]) -> Bool { false }
     func openCta(_ message: BubblMessage) {}

@@ -14,6 +14,19 @@ import BubblCore
 @available(iOS 17, *)
 protocol NotificationPresenting: Sendable {
     func present(_ notification: JSONValue, opened: Bool) async -> Bool
+    func present(_ notification: JSONValue, opened: Bool, region: BubblPresentationRegion?) async -> Bool
+    func present(_ notification: JSONValue, opened: Bool, region: BubblPresentationRegion?, preview: Bool) async -> Bool
+}
+
+@available(iOS 17, *)
+extension NotificationPresenting {
+    func present(_ notification: JSONValue, opened: Bool, region: BubblPresentationRegion?) async -> Bool {
+        await present(notification, opened: opened)
+    }
+
+    func present(_ notification: JSONValue, opened: Bool, region: BubblPresentationRegion?, preview: Bool) async -> Bool {
+        await present(notification, opened: opened, region: region)
+    }
 }
 
 /// Until the notification screen (slice 10): nothing is shown in the app, so a push in front keeps

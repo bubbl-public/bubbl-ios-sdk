@@ -5,14 +5,29 @@ import Foundation
 package struct NotificationEvents: Sendable {
     private let observe: @Sendable (_ type: String, _ notification: BubblNotification) -> Void
     private let enqueue: @Sendable (_ type: String, _ data: [String: JSONValue]) async throws -> Void
+    private let preview: Bool
+
+    /// The custom event a shown preview records, with the preview's id as `notification_id`.
+    package static let previewEvent = "showcase.preview_opened"
 
     /// - Parameter observe: told of each event as it's recorded (the app's event listeners).
+    /// - Parameter preview: for a notification no campaign delivered (`Bubbl.present(_:preview:)`),
+    ///   whose id isn't a campaign_notification_id: no notification, survey or media event is
+    ///   recorded for it (the listeners are still told), and showing it records one custom
+    ///   event, `previewEvent`, instead.
     package init(
         observe: @escaping @Sendable (String, BubblNotification) -> Void = { _, _ in },
+        preview: Bool = false,
         enqueue: @escaping @Sendable (String, [String: JSONValue]) async throws -> Void
     ) {
         self.observe = observe
+        self.preview = preview
         self.enqueue = enqueue
+    }
+
+    /// The same recorder, for a preview.
+    package func asPreview() -> NotificationEvents {
+        NotificationEvents(observe: observe, preview: true, enqueue: enqueue)
     }
 
     package func displayed(_ n: BubblNotification) async throws {
@@ -47,7 +62,14 @@ package struct NotificationEvents: Sendable {
     }
 
     private func record(_ type: String, _ n: BubblNotification, _ data: [String: JSONValue]) async throws {
-        try await enqueue(type, data)
+        if !preview {
+            try await enqueue(type, data)
+        } else if type == "notification.displayed" || type == "notification.opened" {
+            try await enqueue("custom", [
+                "name": .string(Self.previewEvent),
+                "properties": .object(["notification_id": .string(n.campaignNotificationId)]),
+            ])
+        }
         observe(type, n)
     }
 

@@ -163,6 +163,28 @@ public enum Bubbl {
         backend.present(message)
     }
 
+    /// Like `present(_:)`, with the card laid out inside `region` rather than the whole screen.
+    public static func present(_ message: BubblMessage, region: BubblPresentationRegion) {
+        backend.present(message, region: region)
+    }
+
+    /// Like `present(_:)`, for a `preview`: a notification no campaign delivered (the Showcase
+    /// app's list), whose id isn't a campaign notification's. Nothing is reported to Bubbl's
+    /// delivery or engagement reports (no notification, survey or media events, and no dismissal
+    /// from `dismissPresented()`); showing it records one custom event instead,
+    /// `showcase.preview_opened`, with the message's id as `notification_id`. `region` as above
+    /// (nil: the whole screen).
+    public static func present(_ message: BubblMessage, region: BubblPresentationRegion? = nil, preview: Bool) {
+        backend.present(message, region: region, preview: preview)
+    }
+
+    /// Close the notification screen that's showing, if any, reported dismissed as a tap on its
+    /// close button is (unless the person already answered or acted on it). Notifications waiting
+    /// their turn aren't cleared: the next shows as it would after a close.
+    public static func dismissPresented() {
+        backend.dismissPresented()
+    }
+
     /// For an app drawing notifications itself: it's on screen.
     public static func reportDisplayed(_ message: BubblMessage) {
         backend.report("reportDisplayed") { try await $0.displayed(message.notification) }
