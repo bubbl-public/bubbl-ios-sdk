@@ -7,24 +7,26 @@ import BubblCore
 
 /// The privacy view: why Bubbl is about to ask for a permission, shown before the system's prompt
 /// (when the dashboard's notice mode says so), in the dashboard's words when it has set some, with
-/// its privacy policy link. Continue goes on to the prompt; "Not now" ends the request.
+/// its privacy policy link. Continue is its only action, and always goes on to the prompt (App Store
+/// guideline 5.1.1(iv): nothing here may offer to delay or skip it). It's a window of its own, with
+/// nothing to swipe away, so Continue is the only way past it.
 @available(iOS 17, *)
 @MainActor
 enum PrivacyView {
     private static var window: UIWindow?
 
-    /// True for Continue. With no screen to show it on, it goes straight on to the prompt.
-    static func show(kind: String, text: String?, policy: String?) async -> Bool {
+    /// Returns once Continue is tapped. With no screen to show it on, it returns at once.
+    static func show(kind: String, text: String?, policy: String?) async {
         let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
-        guard window == nil, let scene = scenes.first(where: { $0.activationState == .foregroundActive }) else { return true }
+        guard window == nil, let scene = scenes.first(where: { $0.activationState == .foregroundActive }) else { return }
 
-        return await withCheckedContinuation { continuation in
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
             let previousKey = scene.windows.first { $0.isKeyWindow }
-            let view = PrivacyExplanation(kind: kind, text: text, policy: policy) { accepted in
+            let view = PrivacyExplanation(kind: kind, text: text, policy: policy) {
                 window?.isHidden = true
                 window = nil
                 previousKey?.makeKey()
-                continuation.resume(returning: accepted)
+                continuation.resume()
             }
             let host = UIHostingController(rootView: view)
             host.view.backgroundColor = .clear
@@ -42,7 +44,7 @@ struct PrivacyExplanation: View {
     let kind: String
     let text: String?
     let policy: String?
-    let done: @MainActor (Bool) -> Void
+    let done: @MainActor () -> Void
 
     private var title: String {
         switch kind {
@@ -88,12 +90,9 @@ struct PrivacyExplanation: View {
                             .tint(Look.accent)
                             .padding(.top, 12)
                     }
-                    PrimaryButton(title: Words.text("bubbl_continue", "Continue")) { done(true) }
+                    PrimaryButton(title: Words.text("bubbl_continue", "Continue")) { done() }
                         .padding(.top, 20)
                         .accessibilityIdentifier("bubbl.continue")
-                    SecondaryButton(title: Words.text("bubbl_not_now", "Not now")) { done(false) }
-                        .padding(.top, 4)
-                        .accessibilityIdentifier("bubbl.notNow")
                 }
                 .padding(Look.cardPadding)
                 .background(Look.surface)

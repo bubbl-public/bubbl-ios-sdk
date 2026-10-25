@@ -40,8 +40,9 @@ final class PermissionFlow: NSObject, CLLocationManagerDelegate {
         return status
     }
 
-    /// Asks for `request` as the planner says, one request at a time. "Not now" on the privacy view,
-    /// or a refusal, ends it. Returns where the device stands afterwards.
+    /// Asks for `request` as the planner says, one request at a time. The privacy view only ever
+    /// goes on to the system prompt; a refusal there ends the request. Returns where the device
+    /// stands afterwards.
     func request(_ request: PermissionRequest) async -> PermissionStatus {
         guard !asking else { return await status() }
         asking = true
@@ -61,9 +62,7 @@ final class PermissionFlow: NSObject, CLLocationManagerDelegate {
             switch step {
             case .explain(let kind):
                 memory.markExplained(kind)
-                guard await PrivacyView.show(kind: kind, text: config?.privacyText, policy: config?.privacyUrl) else {
-                    return await finished()
-                }
+                await PrivacyView.show(kind: kind, text: config?.privacyText, policy: config?.privacyUrl)
             case .ask(.notifications):
                 let granted = (try? await UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound, .badge])) ?? false
                 if !granted { return await finished() }
