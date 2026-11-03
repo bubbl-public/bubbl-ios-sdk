@@ -49,7 +49,9 @@ package struct ApiResponse: Sendable {
 package enum ApiFailure: Sendable, Equatable {
     /// Try again later with exponential backoff (5xx, no network).
     case backoff
-    /// The server asked for a wait (429, request_in_progress).
+    /// The server asked for a wait (429, request_in_progress): `seconds` from its Retry-After,
+    /// whole seconds from 1 to 15 minutes (30 when it isn't). Whoever waits makes it at least 30 s
+    /// and adds a little jitter (`RetryDelay.seconds`).
     case retryAfter(seconds: Int)
     /// Stop calling the API for a while (workspace paused, free tier); keep queuing.
     case pause(hours: Int, code: String?)
@@ -60,7 +62,6 @@ package enum ApiFailure: Sendable, Equatable {
     /// Something only a developer can fix (misconfiguration): surface it in diagnostics.
     case stopped(status: Int, code: String?)
 
-    private static let defaultRetrySeconds = 30
     private static let defaultPauseHours = 1
 
     /// What a failed `response` means for the caller. Never called with a success.
@@ -71,8 +72,7 @@ package enum ApiFailure: Sendable, Equatable {
         case .backoff:
             return .backoff
         case .waitAndRetry:
-            let seconds = response.header("Retry-After").flatMap { Int($0.trimmingCharacters(in: .whitespaces)) }
-            return .retryAfter(seconds: max(seconds ?? defaultRetrySeconds, 1))
+            return .retryAfter(seconds: RetryDelay.parse(response.header("Retry-After")))
         case .pause:
             return .pause(hours: handling.pauseHours ?? defaultPauseHours, code: response.code)
         case .describeDevice:

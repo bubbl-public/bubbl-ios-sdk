@@ -99,6 +99,8 @@ package struct EngineStores: Sendable {
     package let transitions: any ValueStore<[Transition]>
     /// Region events that came before the first unlock after a reboot, when nothing could be read.
     package let lockedDrops: any ValueStore<Int>
+    /// Unix seconds (device clock) until which the server's last 429 holds every call.
+    package let retryHold: any ValueStore<Int64>
 
     package init(
         credentials: any CredentialStore, events: any EventStore, geofenceState: any GeofenceStateStore,
@@ -107,9 +109,11 @@ package struct EngineStores: Sendable {
         recentNotifications: any ValueStore<[String]>, installId: any ValueStore<String>,
         clockOffset: any ValueStore<Int64>, pausedUntil: any ValueStore<Int64>,
         transitions: any ValueStore<[Transition]>, lockedDrops: any ValueStore<Int>,
-        correlation: any ValueStore<CorrelationId.Saved> = InMemoryValueStore()
+        correlation: any ValueStore<CorrelationId.Saved> = InMemoryValueStore(),
+        retryHold: any ValueStore<Int64> = InMemoryValueStore()
     ) {
         self.correlation = correlation
+        self.retryHold = retryHold
         self.credentials = credentials
         self.events = events
         self.geofenceState = geofenceState
@@ -155,7 +159,8 @@ package struct EngineStores: Sendable {
             pausedUntil: FileValueStore(url: url("paused_until.json"), writeOptions: writeOptions),
             transitions: FileValueStore(url: url("transitions.json"), writeOptions: writeOptions),
             lockedDrops: FileValueStore(url: url("locked_drops.json"), writeOptions: writeOptions),
-            correlation: FileValueStore(url: url("correlation.json"), writeOptions: writeOptions)
+            correlation: FileValueStore(url: url("correlation.json"), writeOptions: writeOptions),
+            retryHold: FileValueStore(url: url("retry_hold.json"), writeOptions: writeOptions)
         )
     }
 }
@@ -185,6 +190,8 @@ package final class EngineCore: Sendable {
     package let config: EngineConfig
     package let clock: ServerClock
     package let api: DeviceApiClient
+    /// The wait a 429 asked of every call (see DeviceApiClient).
+    let retryHold: RetryHold
     package let configSync: ConfigSync
     package let deviceSync: DeviceSync
     package let segments: Segments
@@ -192,6 +199,8 @@ package final class EngineCore: Sendable {
     package let events: EventQueue
     package let geofences: GeofenceEngine
     package let notifications: NotificationSource
+    /// The wait before the requests a push sets off, as the server's config says (sync.pull_jitter_seconds).
+    package let pushJitter: PushJitter
     package let recentNotifications: RecentNotifications
     package let privacy: PrivacyStore
     let stores: EngineStores
@@ -250,7 +259,9 @@ package final class EngineCore: Sendable {
         platform: any DevicePlatform,
         http: any HttpClient,
         monitor: any RegionMonitor,
-        deviceNowSeconds: @escaping @Sendable () -> Int64 = { Int64(Date().timeIntervalSince1970) }
+        deviceNowSeconds: @escaping @Sendable () -> Int64 = { Int64(Date().timeIntervalSince1970) },
+        pushJitterRandom: @escaping PushJitter.Random = PushJitter.defaultRandom,
+        pushJitterSleep: @escaping PushJitter.Sleep = PushJitter.defaultSleep
     ) {
         self.config = config
         self.stores = stores
@@ -265,6 +276,7 @@ package final class EngineCore: Sendable {
         )
 
         let hooks = Hooks()
+        let retryHold = RetryHold(store: stores.retryHold, now: deviceNowSeconds)
         let api = DeviceApiClient(
             baseUrl: config.baseUrl,
             apiKey: config.apiKey,
@@ -277,12 +289,14 @@ package final class EngineCore: Sendable {
                 return try core.installBody()
             },
             onRegistered: { data in hooks.core?.registered(data) },
-            onCredentialRejected: { hooks.credentialRejected?() }
+            onCredentialRejected: { hooks.credentialRejected?() },
+            hold: retryHold
         )
         let configSync = ConfigSync(api: api, clock: clock, store: stores.config)
 
         self.clock = clock
         self.api = api
+        self.retryHold = retryHold
         self.configSync = configSync
         self.hooks = hooks
         deviceSync = DeviceSync(api: api, acknowledged: stores.deviceAcknowledged)
@@ -290,7 +304,9 @@ package final class EngineCore: Sendable {
         correlation = CorrelationId(store: stores.correlation)
         events = EventQueue(store: stores.events, api: api, clock: clock, batchSize: { configSync.current?.maxEventsPerRequest ?? EventQueue.batchSize })
         geofences = GeofenceEngine(api: api, clock: clock, store: stores.geofenceState, monitor: monitor)
-        notifications = NotificationSource(api: api)
+        let pushJitter = PushJitter(windowSeconds: { configSync.current?.pullJitterSeconds }, random: pushJitterRandom, sleep: pushJitterSleep)
+        self.pushJitter = pushJitter
+        notifications = NotificationSource(api: api, jitter: pushJitter)
         recentNotifications = RecentNotifications(store: stores.recentNotifications)
         privacy = PrivacyStore(store: stores.privacy)
         hooks.core = self
@@ -413,7 +429,10 @@ package final class EngineCore: Sendable {
         let wasSupported = sdkSupported
         let refreshed = await configSync.refresh(maxAgeSeconds: configMaxAgeSeconds)
         if case .failed(let failure) = refreshed {
-            _ = await handle(failure, "Fetching the config")
+            let outcome = await handle(failure, "Fetching the config")
+            // The server said to wait (or the device is held after a 429): nothing else goes out
+            // straight after it, only this again once it has passed.
+            if case .retryAfter = failure { return outcome }
         }
         announceSandbox()
         guard sdkSupported else {
@@ -485,13 +504,20 @@ package final class EngineCore: Sendable {
         }
     }
 
+    /// The server said to wait `seconds`: at least 30 s and at most 15 minutes (the runner adds its
+    /// jitter), and never less than what the device-wide hold that 429 started still has to run,
+    /// so the work is back after it ends rather than a moment before (and held again).
+    package func retryAfterOutcome(_ seconds: Int) -> WorkOutcome {
+        .retry(afterSeconds: max(RetryDelay.waitSeconds(seconds), retryHold.remainingSeconds()))
+    }
+
     /// What a failure means for the work that met it (Android's EngineWork.result).
     package func handle(_ failure: ApiFailure, _ work: String) async -> WorkOutcome {
         switch failure {
         case .backoff:
             return .retry(afterSeconds: 30)
         case .retryAfter(let seconds):
-            return .retry(afterSeconds: seconds)
+            return retryAfterOutcome(seconds)
         case .describeDevice:
             // The server doesn't know the device: tell it everything, then this work tries again.
             deviceSync.forget()

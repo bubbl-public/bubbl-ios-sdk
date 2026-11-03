@@ -62,7 +62,9 @@ extension EngineCore {
 
     /// Android's CheckGeofencesWorker: make sure the geofences are watched (`rewatch`: the OS
     /// dropped them), check them against `fix`, and fetch them if due (or `force`).
-    package func checkGeofences(fix: Fix, force: Bool = false, rewatch: Bool = false, osWatches: Bool) async -> WorkOutcome {
+    /// `pushWakeDeadline` (a sync_geofences push, which must be done by then): the fetch waits its
+    /// jitter first, no longer than leaves the fetch time to finish.
+    package func checkGeofences(fix: Fix, force: Bool = false, rewatch: Bool = false, osWatches: Bool, pushWakeDeadline: Date? = nil) async -> WorkOutcome {
         guard locationActive else { return .done }
         saveLockedDrops()
         do {
@@ -74,6 +76,7 @@ extension EngineCore {
         // Its transitions are saved for sending; its refresh is the one below.
         _ = await locationFix(fix, osWatches: osWatches)
 
+        if let pushWakeDeadline { await pushJitter.wait(.geofenceSync, finishBy: pushWakeDeadline) }
         let result: RefreshResult
         do {
             result = try await geofences.refresh(fix, force: force)

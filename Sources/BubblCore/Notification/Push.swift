@@ -98,13 +98,18 @@ package enum NotificationsResult: Sendable, Equatable {
 /// GET /notifications/{id} and POST /notifications/pull.
 package struct NotificationSource: Sendable {
     private let api: DeviceApiClient
+    private let jitter: PushJitter?
 
-    package init(api: DeviceApiClient) {
+    package init(api: DeviceApiClient, jitter: PushJitter? = nil) {
         self.api = api
+        self.jitter = jitter
     }
 
-    /// One notification a push referred to without carrying it.
-    package func fetch(_ campaignNotificationId: String) async -> NotificationsResult {
+    /// One notification a push referred to without carrying it. A fetch for a push that woke the
+    /// app (`pushWakeDeadline`: when that wake must be finished by) waits its jitter first; any
+    /// other (a tap's, a retry) never does.
+    package func fetch(_ campaignNotificationId: String, pushWakeDeadline: Date? = nil) async -> NotificationsResult {
+        if let pushWakeDeadline { await jitter?.wait(.notificationFetch, finishBy: pushWakeDeadline) }
         let response: ApiResponse
         do {
             let id = campaignNotificationId.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed.subtracting(["/"])) ?? campaignNotificationId

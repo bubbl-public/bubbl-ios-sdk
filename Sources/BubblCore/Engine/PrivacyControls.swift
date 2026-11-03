@@ -50,7 +50,7 @@ extension EngineCore {
         case .failed(.backoff):
             return .retry(afterSeconds: 30)
         case .failed(.retryAfter(let seconds)):
-            return .retry(afterSeconds: seconds)
+            return retryAfterOutcome(seconds)
         default:
             // Told, or refused for good (paused, misconfigured): the device stays quiet either way.
             return .done
@@ -87,7 +87,7 @@ extension EngineCore {
             if !response.isSuccessful && response.status != 404 {
                 switch ApiFailure.of(response) {
                 case .backoff: return .retry(afterSeconds: 30)
-                case .retryAfter(let seconds): return .retry(afterSeconds: seconds)
+                case .retryAfter(let seconds): return retryAfterOutcome(seconds)
                 case .pause(let hours, _): return .retry(afterSeconds: hours * 3_600)
                 default:
                     if eraseAttempts.next() < Self.maxEraseAttempts { return .retry(afterSeconds: 60) }

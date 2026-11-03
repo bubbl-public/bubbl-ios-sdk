@@ -22,7 +22,11 @@ extension EngineCore {
     /// hears of it only then. The first time a notification arrives, notification.received is
     /// recorded and it's to be shown; after that (a push and a pull, the same push in front and
     /// then tapped) it's shown again only when tapped: the person asked for it.
-    package func receivedPush(_ data: [String: JSONValue], opened: Bool) async -> PushHandling {
+    ///
+    /// `pushWakeDeadline`: the push woke the app (rather than reaching it in front), which must be
+    /// done by then, so the fetch of a notification it didn't carry waits its jitter. A tap
+    /// (`opened`) never waits.
+    package func receivedPush(_ data: [String: JSONValue], opened: Bool, pushWakeDeadline: Date? = nil) async -> PushHandling {
         guard let message = PushMessage.parse(data) else { return .nothing }
 
         switch message {
@@ -34,7 +38,7 @@ extension EngineCore {
             return await notificationArrived(notification, opened: opened)
         case .reference(let id):
             guard isActive else { return .nothing }
-            switch await notifications.fetch(id) {
+            switch await notifications.fetch(id, pushWakeDeadline: opened ? nil : pushWakeDeadline) {
             case .found(let found):
                 guard let notification = found.first else { return .nothing }
                 return await notificationArrived(notification, opened: opened)

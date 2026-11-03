@@ -124,12 +124,16 @@ extension EngineHost {
     /// A Bubbl push arrived with the app in front: how iOS should show it. Bubbl's screen shows a
     /// campaign's notification when it can (then no banner); a test push is a plain banner; a
     /// notification already shown, or anything while Bubbl isn't active, isn't shown again.
-    func presentation(forArriving data: [String: JSONValue]) async -> UNNotificationPresentationOptions {
+    ///
+    /// `pushWakeDeadline`: iOS woke the app for it in the background, to be done by then, so the
+    /// fetch of a notification the push didn't carry waits the server's jitter. A push reaching the
+    /// app in front doesn't.
+    func presentation(forArriving data: [String: JSONValue], pushWakeDeadline: Date? = nil) async -> UNNotificationPresentationOptions {
         // Started later in this launch (a wrapper's JavaScript or Dart not run yet): the system
         // shows it, rather than swallowing a push.
         guard let core = current else { return Self.systemPresentation }
 
-        switch await core.receivedPush(data, opened: false) {
+        switch await core.receivedPush(data, opened: false, pushWakeDeadline: pushWakeDeadline) {
         case .show(let notification, let received):
             return await show(notification, received: received, opened: false) ? [] : Self.systemPresentation
         case .test:
@@ -178,10 +182,12 @@ extension EngineHost {
         guard let core = current, core.isActive else { return .noData }
 
         guard let message = PushMessage.parse(data) else { return .noData }
+        // iOS ends the handler after about 30 s: the jitter waits only as long as leaves its request time.
+        let deadline = PushJitter.deadline()
         switch message {
         case .syncGeofences:
             BubblLog.info("Silent push received: syncing geofences")
-            let outcome = await runCheck(core, force: true, precise: false, rewatch: false, fix: nil)
+            let outcome = await runCheck(core, force: true, precise: false, rewatch: false, fix: nil, pushWakeDeadline: deadline)
             switch outcome {
             case .done:
                 return .newData
@@ -189,7 +195,7 @@ extension EngineHost {
                 return .failed
             }
         case .full, .reference:
-            _ = await presentation(forArriving: data)
+            _ = await presentation(forArriving: data, pushWakeDeadline: deadline)
             return .newData
         case .test, .unsupported:
             return .noData

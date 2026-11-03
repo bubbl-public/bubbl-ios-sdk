@@ -45,20 +45,23 @@ package enum ErrorActions {
         case "invalid_key", "invalid_signature", "credential_revoked": ErrorHandling(.reRegister)
         case "workspace_paused": ErrorHandling(.pause, pauseHours: 6)
         case "own_app_not_in_plan": ErrorHandling(.pause, pauseHours: 24)
-        // Sandbox: no room for another device awaiting approval; back off as for a paused workspace.
-        case "sandbox_pending_full": ErrorHandling(.pause, pauseHours: 6)
+        // Sandbox: no room for another device awaiting approval, or the Sandbox is switched off; back off as for a paused workspace.
+        case "sandbox_pending_full", "sandbox_unavailable": ErrorHandling(.pause, pauseHours: 6)
         // A Sandbox key at the Production address or the other way round: only the app can fix it.
         case "wrong_environment": ErrorHandling(.stopAndReport)
-        case "showcase_only", "unknown_notification": ErrorHandling(.drop)
+        // Resending an oversized body won't help: the caller sends fewer events at a time.
+        case "showcase_only", "unknown_notification", "payload_too_large": ErrorHandling(.drop)
         case "device_not_registered": ErrorHandling(.describeDevice)
         case "request_in_progress", "too_many_failed_attempts": ErrorHandling(.waitAndRetry)
         case "unknown_location": ErrorHandling(.dropAndRefreshGeofences)
         // The message goes back to whoever asked (pairing; Bubbl.registerTestDevice).
         case "invalid_pairing_code", "invalid_test_device_code", "test_devices_full": ErrorHandling(.showMessage)
-        case "rate_limited": ErrorHandling(.waitAndRetry)
+        case "rate_limited", "overloaded": ErrorHandling(.waitAndRetry)
         default:
             switch status {
             case 422: ErrorHandling(.drop)
+            // The load balancer answers a body over 1 MB with an HTML 413 that has no code.
+            case 413: ErrorHandling(.drop)
             case 429: ErrorHandling(.waitAndRetry)
             case 500...: ErrorHandling(.backoff)
             default: ErrorHandling(.stopAndReport)

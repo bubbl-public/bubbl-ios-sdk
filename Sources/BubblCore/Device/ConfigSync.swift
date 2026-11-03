@@ -35,6 +35,11 @@ package struct SdkConfig: Sendable, Hashable {
         json["sync"]?["max_events_per_request"]?.int64(in: 1...Int64(EventQueue.batchSize)).map { Int($0) } ?? EventQueue.batchSize
     }
 
+    /// sync.pull_jitter_seconds as served: the window a push waits within before the requests it
+    /// sets off (see PushJitter). Nil when the config has none (a server that doesn't send it yet),
+    /// which is no wait; clamping is PushJitter's.
+    package var pullJitterSeconds: Int64? { json["sync"]?["pull_jitter_seconds"]?.int64 }
+
     /// The dashboard's privacy view: when to explain before asking for a permission.
     package var privacyNotice: String {
         let notice = json["privacy"]?["notice"]?.stringValue ?? ""

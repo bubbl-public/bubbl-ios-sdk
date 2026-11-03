@@ -109,7 +109,7 @@ extension EngineHost {
     // MARK: - Work
 
     /// Android's CheckGeofencesWorker, with the fix from CoreLocation.
-    func runCheck(_ core: EngineCore, force: Bool, precise: Bool, rewatch: Bool, fix: Fix?) async -> WorkOutcome {
+    func runCheck(_ core: EngineCore, force: Bool, precise: Bool, rewatch: Bool, fix: Fix?, pushWakeDeadline: Date? = nil) async -> WorkOutcome {
         guard core.locationActive else { return .done }
         let (access, osWatches) = await MainActor.run { (LocationService.shared.access, LocationService.shared.osWatches) }
         guard access != .none else { return .done }
@@ -121,7 +121,7 @@ extension EngineHost {
             return .done
         }
 
-        let result = await core.checkGeofences(fix: current, force: force, rewatch: rewatch, osWatches: osWatches)
+        let result = await core.checkGeofences(fix: current, force: force, rewatch: rewatch, osWatches: osWatches, pushWakeDeadline: pushWakeDeadline)
         if core.hasPendingTransitions { await sendTransitionsNow(core) }
         return result
     }

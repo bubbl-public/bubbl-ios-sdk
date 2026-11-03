@@ -19,6 +19,10 @@ package enum DeviceApiError: Error {
 ///  - invalid_key / invalid_signature / credential_revoked: register again, once, then retry
 ///    once (a second failure is returned as it is, so this can never loop).
 ///
+/// After a 429 the whole client holds (`RetryHold`): until the wait the server asked for has
+/// passed, every call fails at once, as a 429 with the wait that's left, without a request.
+/// Nothing is dropped by that; each caller treats it as it would the server's own answer.
+///
 /// Every response's Date header keeps the clock in step. Registering is serialised: requests
 /// that find the credential missing or refused wait for one registration rather than each
 /// doing one (found on a device: sync, config and geofences all start at once on first launch).
@@ -35,6 +39,7 @@ package final class DeviceApiClient: Sendable {
     private let onRegistered: @Sendable ([String: Any]) -> Void
     private let registration = AsyncMutex()
     private let serverErrors = ServerErrorStreak()
+    private let hold: RetryHold
 
     /// - Parameters:
     ///   - installBody: what POST /installs sends (api_key is added here): the install id the SDK
@@ -51,7 +56,8 @@ package final class DeviceApiClient: Sendable {
         clock: ServerClock,
         installBody: @escaping @Sendable () throws -> [String: Any],
         onRegistered: @escaping @Sendable ([String: Any]) -> Void = { _ in },
-        onCredentialRejected: @escaping @Sendable () -> Void = {}
+        onCredentialRejected: @escaping @Sendable () -> Void = {},
+        hold: RetryHold = RetryHold()
     ) {
         var trimmed = baseUrl
         while trimmed.hasSuffix("/") { trimmed.removeLast() }
@@ -64,6 +70,7 @@ package final class DeviceApiClient: Sendable {
         self.installBody = installBody
         self.onRegistered = onRegistered
         self.onCredentialRejected = onCredentialRejected
+        self.hold = hold
     }
 
     /// POST /installs: registers (or registers again) and keeps the credential it returns.
@@ -132,6 +139,18 @@ package final class DeviceApiClient: Sendable {
     private struct Sent: Sendable {
         let response: ApiResponse
         let keyId: String?
+    }
+
+    static let tooManyFailedAttempts = "too_many_failed_attempts"
+
+    /// What a call gets, without a request, while the server's 429 still holds the device: that
+    /// 429, with the wait that's left. It has no code, so it's handled as the 429 it stands for.
+    private static func heldResponse(seconds: Int) -> ApiResponse {
+        ApiResponse(HttpResponse(
+            status: 429,
+            body: #"{"message":"The server asked this device to wait; not calling the API until then."}"#,
+            headers: ["Retry-After": [String(max(seconds, 1))]]
+        ))
     }
 
     /// What a device started with a credential gets where an install would register.
@@ -208,9 +227,17 @@ package final class DeviceApiClient: Sendable {
     }
 
     private func execute(_ request: HttpRequest) async throws -> ApiResponse {
+        let held = hold.remainingSeconds()
+        if held > 0 { return Self.heldResponse(seconds: held) }
+
         let response = try await http.execute(request)
         clock.sync(dateHeader: response.header("Date"))
         let result = ApiResponse(response)
+        // Load shedding: the whole device waits, not just this call. (Too many failed pairing
+        // attempts is about the code that was typed, not the server's load.)
+        if response.status == 429, result.code != Self.tooManyFailedAttempts {
+            hold.hold(seconds: RetryDelay.seconds(RetryDelay.parse(response.header("Retry-After"))))
+        }
         if let said = Self.wrongEnvironment(result) { BubblLog.error(said) }
         let path = String((URLComponents(string: request.url)?.percentEncodedPath ?? "").drop { $0 == "/" })
         if let said = serverErrors.record(status: response.status, method: request.method, path: path) { BubblLog.error(said) }
