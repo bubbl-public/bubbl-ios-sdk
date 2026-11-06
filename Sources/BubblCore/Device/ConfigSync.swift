@@ -40,6 +40,9 @@ package struct SdkConfig: Sendable, Hashable {
     /// which is no wait; clamping is PushJitter's.
     package var pullJitterSeconds: Int64? { json["sync"]?["pull_jitter_seconds"]?.int64 }
 
+    /// geofencing.* (the approach zone and live tracking), defaults where the config has none.
+    package var approach: ApproachSettings { ApproachSettings(json["geofencing"]) }
+
     /// The dashboard's privacy view: when to explain before asking for a permission.
     package var privacyNotice: String {
         let notice = json["privacy"]?["notice"]?.stringValue ?? ""

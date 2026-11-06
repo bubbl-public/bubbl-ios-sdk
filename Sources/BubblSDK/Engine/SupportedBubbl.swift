@@ -290,7 +290,7 @@ struct SupportedBubbl: BubblBackend {
                 pausedUntil: nil, consentRequired: false, consent: nil, locationEnabled: true, permissions: nil, hasPushToken: false,
                 geofences: 0, queuedEvents: 0, lastError: BubblLog.lastError, credentialRejected: EngineHost.shared.isCredentialRejected, backgroundLocation: false,
                 transitionsDroppedWhileLocked: 0, backgroundRefreshAvailable: backgroundRefresh, lowPowerMode: lowPower,
-                osWatchesGeofences: false, environment: nil, testDevice: nil
+                osWatchesGeofences: false, environment: nil, testDevice: nil, lastGeofenceSync: nil, recentGeofenceDecisions: []
             )
         }
         let privacy = core.privacy.state
@@ -318,7 +318,9 @@ struct SupportedBubbl: BubblBackend {
             lowPowerMode: lowPower,
             osWatchesGeofences: await Self.osWatchesGeofences(),
             environment: core.workspace?.environment,
-            testDevice: core.workspace?.testDevice.map { Bubbl.Diagnostics.TestDevice(status: $0.status, code: $0.code) }
+            testDevice: core.workspace?.testDevice.map { Bubbl.Diagnostics.TestDevice(status: $0.status, code: $0.code) },
+            lastGeofenceSync: core.decisionLog.lastSync?.summary,
+            recentGeofenceDecisions: core.decisionLog.recent(5).map(\.summary)
         )
     }
 

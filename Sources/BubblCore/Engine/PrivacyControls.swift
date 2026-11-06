@@ -139,6 +139,7 @@ extension EngineCore {
         try stores.pausedUntil.delete()
         try stores.transitions.delete()
         try stores.lockedDrops.delete()
+        decisionLog.clear()
     }
 
     /// Stops what the engine does and drops what's queued (geofences, events, unsent transitions).
@@ -146,6 +147,7 @@ extension EngineCore {
         try? await geofences.stop()
         try? await events.clear()
         try? stores.transitions.delete()
+        decisionLog.clear()
     }
 }
 

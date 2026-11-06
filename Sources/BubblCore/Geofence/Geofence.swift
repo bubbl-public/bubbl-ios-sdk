@@ -46,6 +46,23 @@ package struct Geofence: Sendable, Hashable, Codable {
     }
 
     package var isPolygon: Bool { polygon != nil }
+
+    /// Whether `fix` puts the device inside this geofence itself (polygon or circle; the OS only
+    /// knows the bigger approach zone around it). Nil when the fix can't say: too vague, or, for a
+    /// device that `wasInside`, not clearly outside (by more than the fix's accuracy), so a
+    /// jittery fix at the edge doesn't flap in and out.
+    package func insideAt(_ fix: Fix, wasInside: Bool, maxPolygonAccuracy: Double, maxCircleAccuracy: Double) -> Bool? {
+        guard let accuracy = fix.accuracyMeters else { return nil }
+        if let polygon {
+            guard accuracy <= maxPolygonAccuracy else { return nil }
+            if Geo.contains(polygon, fix.position) { return true }
+            return wasInside && Geo.distanceToRingMeters(polygon, fix.position) <= accuracy ? nil : false
+        }
+        guard accuracy <= maxCircleAccuracy else { return nil }
+        let distance = Geo.distanceMeters(center, fix.position)
+        if distance <= Double(radiusMeters) { return true }
+        return wasInside && distance - accuracy <= Double(radiusMeters) ? nil : false
+    }
 }
 
 /// What GET /geofences last returned, with where and when it was asked from: the device asks
@@ -156,5 +173,24 @@ package enum Geo {
             j = i
         }
         return inside
+    }
+
+    /// Distance from `point` to the nearest edge of `ring` (flat projection: exact enough at geofence scale).
+    package static func distanceToRingMeters(_ ring: [LatLng], _ point: LatLng) -> Double {
+        let metersPerDegree = Double.pi / 180 * earthRadiusMeters
+        let lngScale = cos(point.latitude * Double.pi / 180)
+        func x(_ p: LatLng) -> Double { (p.longitude - point.longitude) * metersPerDegree * lngScale }
+        func y(_ p: LatLng) -> Double { (p.latitude - point.latitude) * metersPerDegree }
+        var best = Double.greatestFiniteMagnitude
+        for i in ring.indices {
+            let a = ring[i]
+            let b = ring[(i + 1) % ring.count]
+            let (ax, ay, dx, dy) = (x(a), y(a), x(b) - x(a), y(b) - y(a))
+            let length2 = dx * dx + dy * dy
+            let t = length2 == 0 ? 0 : min(1, max(0, (-ax * dx - ay * dy) / length2))
+            let (px, py) = (ax + t * dx, ay + t * dy)
+            best = min(best, (px * px + py * py).squareRoot())
+        }
+        return best
     }
 }

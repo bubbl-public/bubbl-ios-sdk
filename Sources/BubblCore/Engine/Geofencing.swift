@@ -7,6 +7,13 @@ package struct TransitionsSent: Sendable, Equatable {
     package var notifications: [JSONValue] = []
     /// A transition was refused because its location has gone: check the geofences again.
     package var recheck = false
+    /// The geofences those notifications came for (BUB-436 log), when any.
+    package var locations: [String] = []
+
+    /// Not part of equality: it only labels the decision log.
+    package static func == (a: TransitionsSent, b: TransitionsSent) -> Bool {
+        a.outcome == b.outcome && a.notifications == b.notifications && a.recheck == b.recheck
+    }
 
     package init(outcome: WorkOutcome = .done, notifications: [JSONValue] = [], recheck: Bool = false) {
         self.outcome = outcome
@@ -64,7 +71,8 @@ extension EngineCore {
     /// dropped them), check them against `fix`, and fetch them if due (or `force`).
     /// `pushWakeDeadline` (a sync_geofences push, which must be done by then): the fetch waits its
     /// jitter first, no longer than leaves the fetch time to finish.
-    package func checkGeofences(fix: Fix, force: Bool = false, rewatch: Bool = false, osWatches: Bool, pushWakeDeadline: Date? = nil) async -> WorkOutcome {
+    /// `trigger` ("push", "open" or "refresh") and `permission` are only for the last-sync diagnostics.
+    package func checkGeofences(fix: Fix, force: Bool = false, rewatch: Bool = false, osWatches: Bool, pushWakeDeadline: Date? = nil, trigger: String = "refresh", permission: String = "unknown") async -> WorkOutcome {
         guard locationActive else { return .done }
         saveLockedDrops()
         do {
@@ -85,6 +93,8 @@ extension EngineCore {
         }
         BubblLog.debug("Geofence check: \(result)")
         if case .failed(let failure) = result { return await handle(failure, "Checking geofences") }
+        let watched = max(0, ((try? await geofences.watchedRegions().count) ?? 1) - 1)  // not counting the refresh region
+        decisionLog.recordSync(GeofenceSyncInfo(atMillis: deviceNowSeconds() * 1000, trigger: trigger, regions: watched, permission: permission))
         return .done
     }
 
@@ -109,10 +119,20 @@ extension EngineCore {
         loop: for transition in pending {
             switch await geofences.send(transition) {
             case .delivered(let notifications):
+                // What the server decided is its own (cooldown, once per device, quiet hours, caps): all it says is whether anything came back.
+                decisionLog.record(GeofenceDecision(
+                    regionId: transition.locationId, event: transition.enter ? "enter" : "exit", result: "sent",
+                    reason: notifications.isEmpty ? "server_sent_none" : nil, tsMillis: deviceNowSeconds() * 1000
+                ))
+                sent.locations += notifications.isEmpty ? [] : [transition.locationId]
                 BubblLog.debug("Geofence \(transition.enter ? "entry" : "exit") sent: \(notifications.count) notification(s) to show")
                 sent.notifications += notifications
                 finished.insert(transition.key)
             case .dropped(let reason):
+                decisionLog.record(GeofenceDecision(
+                    regionId: transition.locationId, event: transition.enter ? "enter" : "exit", result: "send_dropped",
+                    reason: reason, tsMillis: deviceNowSeconds() * 1000
+                ))
                 sent.recheck = sent.recheck || reason == "unknown_location"
                 finished.insert(transition.key)
             case .failed(let failure):

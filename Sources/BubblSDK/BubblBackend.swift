@@ -121,7 +121,7 @@ struct UnsupportedBubbl: BubblBackend {
             active: false, pausedUntil: nil, consentRequired: false, consent: nil, locationEnabled: true, permissions: nil,
             hasPushToken: false, geofences: 0, queuedEvents: 0, lastError: nil, credentialRejected: false, backgroundLocation: false,
             transitionsDroppedWhileLocked: 0, backgroundRefreshAvailable: false, lowPowerMode: ProcessInfo.processInfo.isLowPowerModeEnabled,
-            osWatchesGeofences: false, environment: nil, testDevice: nil
+            osWatchesGeofences: false, environment: nil, testDevice: nil, lastGeofenceSync: nil, recentGeofenceDecisions: []
         )
     }
 

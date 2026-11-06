@@ -101,6 +101,8 @@ package struct EngineStores: Sendable {
     package let lockedDrops: any ValueStore<Int>
     /// Unix seconds (device clock) until which the server's last 429 holds every call.
     package let retryHold: any ValueStore<Int64>
+    /// The geofence decision log and the last geofence sync (BUB-436).
+    package let decisions: any ValueStore<DecisionLogState>
 
     package init(
         credentials: any CredentialStore, events: any EventStore, geofenceState: any GeofenceStateStore,
@@ -110,8 +112,10 @@ package struct EngineStores: Sendable {
         clockOffset: any ValueStore<Int64>, pausedUntil: any ValueStore<Int64>,
         transitions: any ValueStore<[Transition]>, lockedDrops: any ValueStore<Int>,
         correlation: any ValueStore<CorrelationId.Saved> = InMemoryValueStore(),
-        retryHold: any ValueStore<Int64> = InMemoryValueStore()
+        retryHold: any ValueStore<Int64> = InMemoryValueStore(),
+        decisions: any ValueStore<DecisionLogState> = InMemoryValueStore()
     ) {
+        self.decisions = decisions
         self.correlation = correlation
         self.retryHold = retryHold
         self.credentials = credentials
@@ -160,7 +164,8 @@ package struct EngineStores: Sendable {
             transitions: FileValueStore(url: url("transitions.json"), writeOptions: writeOptions),
             lockedDrops: FileValueStore(url: url("locked_drops.json"), writeOptions: writeOptions),
             correlation: FileValueStore(url: url("correlation.json"), writeOptions: writeOptions),
-            retryHold: FileValueStore(url: url("retry_hold.json"), writeOptions: writeOptions)
+            retryHold: FileValueStore(url: url("retry_hold.json"), writeOptions: writeOptions),
+            decisions: FileValueStore(url: url("geofence_decisions.json"), writeOptions: writeOptions)
         )
     }
 }
@@ -198,6 +203,9 @@ package final class EngineCore: Sendable {
     package let correlation: CorrelationId
     package let events: EventQueue
     package let geofences: GeofenceEngine
+    /// What the geofence engine decided and why (BUB-436), uploaded as geofence.decision events.
+    package let decisionLog: DecisionLog
+    let decisionUploader: DecisionUploader
     package let notifications: NotificationSource
     /// The wait before the requests a push sets off, as the server's config says (sync.pull_jitter_seconds).
     package let pushJitter: PushJitter
@@ -303,7 +311,10 @@ package final class EngineCore: Sendable {
         segments = Segments(store: stores.segments)
         correlation = CorrelationId(store: stores.correlation)
         events = EventQueue(store: stores.events, api: api, clock: clock, batchSize: { configSync.current?.maxEventsPerRequest ?? EventQueue.batchSize })
-        geofences = GeofenceEngine(api: api, clock: clock, store: stores.geofenceState, monitor: monitor)
+        let decisionLog = DecisionLog(store: stores.decisions)
+        self.decisionLog = decisionLog
+        decisionUploader = DecisionUploader(log: decisionLog, api: api, clock: clock, deviceNowSeconds: deviceNowSeconds)
+        geofences = GeofenceEngine(api: api, clock: clock, store: stores.geofenceState, monitor: monitor, approach: { configSync.current?.approach ?? ApproachSettings() }, decisions: decisionLog)
         let pushJitter = PushJitter(windowSeconds: { configSync.current?.pullJitterSeconds }, random: pushJitterRandom, sleep: pushJitterSleep)
         self.pushJitter = pushJitter
         notifications = NotificationSource(api: api, jitter: pushJitter)
@@ -404,6 +415,8 @@ package final class EngineCore: Sendable {
         if case .failed(let failure) = await events.flush() {
             return await handle(failure, "Sending events")
         }
+        // Geofence decisions go in requests of their own, after the real events and never in their way.
+        await decisionUploader.flush()
         return .done
     }
 

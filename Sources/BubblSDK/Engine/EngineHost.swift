@@ -45,6 +45,13 @@ final class EngineHost: @unchecked Sendable {
 
     var current: EngineCore? { lock.sync { core } }
 
+    private var forcedMode: TrackingMode?
+    /// BubblOptions.forceGeofencingMode (test-only), kept for the launches the OS makes without the app's code.
+    var forcedTrackingMode: TrackingMode? {
+        get { lock.sync { forcedMode } }
+        set { lock.sync { forcedMode = newValue } }
+    }
+
     /// The app's say over each notification before Bubbl shows it (Bubbl.setNotificationListener).
     var notificationListener: (@MainActor @Sendable (BubblMessage) -> Bool)? {
         get { lock.sync { listener } }
@@ -55,6 +62,7 @@ final class EngineHost: @unchecked Sendable {
     struct Started: Codable, Equatable {
         let config: EngineConfig
         let logLevel: BubblOptions.LogLevel
+        var forcedMode: String?
     }
 
     /// Starts (or keeps) the engine for `config`, with an API key or a credential issued outside the
@@ -68,7 +76,8 @@ final class EngineHost: @unchecked Sendable {
         guard let core = engine(for: config, fresh: afresh) else { return nil }
         try? identityStore()?.save(identity)
         try? rejectedStore()?.delete()
-        try? startedStore()?.save(Started(config: config, logLevel: options.logLevel))
+        forcedTrackingMode = options.forceGeofencingMode.flatMap { TrackingMode(rawValue: $0.rawValue) }
+        try? startedStore()?.save(Started(config: config, logLevel: options.logLevel, forcedMode: options.forceGeofencingMode?.rawValue))
 
         guard afresh || credential != nil else {
             proceed(core, options)
@@ -131,9 +140,12 @@ final class EngineHost: @unchecked Sendable {
     /// runs. The app's own `start` later changes nothing, or applies its new options.
     func applicationDidFinishLaunching() {
         guard current == nil else { return }
+        // The host's last level, even when nothing else can start (a woken app must not drop to warning).
+        if let level = Self.logLevelMemory()?.recall().flatMap(BubblOptions.LogLevel.init(rawValue:)) { SystemLog.use(level, remember: false) }
         // Before the first unlock after a reboot it can't be read: nothing starts (such events are lost).
         guard let saved = (try? startedStore()?.load()) ?? nil else { return }
-        SystemLog.use(saved.logLevel)
+        SystemLog.use(saved.logLevel, remember: false)
+        forcedTrackingMode = saved.forcedMode.flatMap(TrackingMode.init(rawValue:))
         guard let core = engine(for: saved.config) else { return }
         BubblLog.info("Bubbl started itself for this launch, as the app last started it")
         run(core, launchFinished: true)
@@ -169,6 +181,11 @@ final class EngineHost: @unchecked Sendable {
         #endif
         observeTheApp()
         resume(core)
+    }
+
+    /// The log level the host set at its last start, for a launch where it hasn't set it yet.
+    static func logLevelMemory() -> LogLevelMemory? {
+        directory().map { LogLevelMemory(store: FileValueStore(url: $0.appendingPathComponent("log_level.json"), writeOptions: writeOptions)) }
     }
 
     private func startedStore() -> FileValueStore<Started>? {
@@ -208,7 +225,13 @@ final class EngineHost: @unchecked Sendable {
         }
         resumePrivacyWork(core)
         // Maintenance runs whatever the state: it's how an SDK below the minimum comes back.
-        submit("maintenance") { await $0.maintenance(configMaxAgeSeconds: EngineCore.openConfigMaxAgeSeconds) }
+        submit("maintenance") { core in
+            let outcome = await core.maintenance(configMaxAgeSeconds: EngineCore.openConfigMaxAgeSeconds)
+            #if os(iOS)
+            self.applyTrackingMode(core)  // a mode change arrives with the config
+            #endif
+            return outcome
+        }
         guard core.isActive else { return }
         submit("device") { await $0.syncDevice() }
         submit("events") { await $0.flushEvents() }

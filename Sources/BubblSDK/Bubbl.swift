@@ -286,7 +286,7 @@ public enum Bubbl {
         /// False when the workspace requires a newer SDK.
         public let sdkSupported: Bool
         public let registered: Bool
-        /// The install id the engine keeps (how Dashboard › Active users finds this device); nil
+        /// The install id the engine keeps (device_id in the dashboard's device data); nil
         /// before there is one.
         public let installId: String?
         /// Running: started, consent allows it, not paused by the server, supported.
@@ -321,6 +321,12 @@ public enum Bubbl {
         public let environment: String?
         /// In Sandbox, where this device stands as a test device; nil in Production.
         public let testDevice: TestDevice?
+        /// The last geofence check, readable without Xcode: when, what set it off (push, open or
+        /// refresh), how many regions are watched and the location permission. Nil before one.
+        public let lastGeofenceSync: String?
+        /// The last few geofence decisions (the OS's region event, the polygon or radius result,
+        /// why nothing showed), oldest first: ids, ages and accuracies, never a position.
+        public let recentGeofenceDecisions: [String]
 
         /// A Sandbox test device: "pending" until someone approves it (in the dashboard, with
         /// `code`, or with `Bubbl.registerTestDevice`), then "approved". Unused for 30 days, or

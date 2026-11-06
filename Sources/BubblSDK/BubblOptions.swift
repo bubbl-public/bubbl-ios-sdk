@@ -30,7 +30,17 @@ public struct BubblOptions: Sendable, Equatable {
     /// The device's segments, as `Bubbl.setSegments` would set them.
     public var segments: [String]?
 
-    public init(baseUrl: String, requireConsent: Bool = false, logLevel: LogLevel = .warning, segments: [String]? = nil) {
+    /// TEST-ONLY location mode, for QA rigs. Production apps leave it nil: the workspace's setting
+    /// (/config `geofencing.mode`, "zone" by default) decides. When set it wins over the server,
+    /// and "always" runs continuous background location (battery, blue status bar indicator).
+    /// Not available in the Flutter and React Native wrappers.
+    public enum GeofencingMode: String, Sendable, Equatable, CaseIterable { case zone, always }
+
+    /// TEST-ONLY: forces the location mode over /config. Leave nil in production.
+    public var forceGeofencingMode: GeofencingMode?
+
+    public init(baseUrl: String, requireConsent: Bool = false, logLevel: LogLevel = .warning, segments: [String]? = nil, forceGeofencingMode: GeofencingMode? = nil) {
+        self.forceGeofencingMode = forceGeofencingMode
         self.baseUrl = baseUrl
         self.requireConsent = requireConsent
         self.logLevel = logLevel

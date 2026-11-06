@@ -91,18 +91,40 @@ extension EngineHost {
     /// app's event listeners; the app's notification listener may take it (then Bubbl shows
     /// nothing); otherwise Bubbl's screen. True when it was shown in the app.
     func show(_ json: JSONValue, received: Bool, opened: Bool) async -> Bool {
-        guard let notification = BubblNotification(json) else { return false }
-        let message = BubblMessage(notification)
-        if received { BubblEvents.shared.emit(.notificationReceived(message)) }
-        if let listener = notificationListener, await MainActor.run(body: { listener(message) }) { return true }
-        return await presenter.present(json, opened: opened)
+        await showing(json, received: received, opened: opened).shown
     }
 
-    /// Notifications a geofence or a pull brought, each shown the first time it arrives.
-    func arrived(_ notifications: [JSONValue], _ core: EngineCore) async {
+    /// `show`, and why it didn't show when it didn't (for the geofence decision log): app_listener
+    /// when the app took it, not_shown when Bubbl couldn't (notifications off, nothing to present on).
+    func showing(_ json: JSONValue, received: Bool, opened: Bool) async -> (shown: Bool, reason: String?) {
+        guard let notification = BubblNotification(json) else { return (false, "unreadable") }
+        let message = BubblMessage(notification)
+        if received { BubblEvents.shared.emit(.notificationReceived(message)) }
+        if let listener = notificationListener, await MainActor.run(body: { listener(message) }) { return (true, "app_listener") }
+        let shown = await presenter.present(json, opened: opened)
+        return (shown, shown ? nil : "not_shown")
+    }
+
+    /// Notifications a geofence or a pull brought, each shown the first time it arrives. `location`:
+    /// the geofence they came for, when known, to say in the decision log what became of them.
+    func arrived(_ notifications: [JSONValue], _ core: EngineCore, location: String? = nil) async {
         for notification in notifications {
-            if case .show(let json, let received) = await core.notificationArrived(notification, opened: false) {
-                _ = await show(json, received: received, opened: false)
+            switch await core.notificationArrived(notification, opened: false) {
+            case .show(let json, let received):
+                let outcome = await showing(json, received: received, opened: false)
+                if let location {
+                    core.decisionLog.record(GeofenceDecision(
+                        regionId: location, event: "enter", result: outcome.reason == nil ? "shown" : "not_shown",
+                        reason: outcome.reason, tsMillis: Int64(Date().timeIntervalSince1970 * 1000)
+                    ))
+                }
+            default:
+                if let location {
+                    core.decisionLog.record(GeofenceDecision(
+                        regionId: location, event: "enter", result: "not_shown", reason: "once_per_device",
+                        tsMillis: Int64(Date().timeIntervalSince1970 * 1000)
+                    ))
+                }
             }
         }
     }

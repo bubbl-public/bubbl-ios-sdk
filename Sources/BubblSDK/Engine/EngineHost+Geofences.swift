@@ -34,10 +34,10 @@ extension EngineHost {
     /// Check the geofences soon: fetch them if due (or `force`), from `fix` or a fresh one
     /// (`precise` for a polygon), watching them again first if `rewatch`. A check asked for while
     /// one runs replaces any other waiting.
-    func checkGeofences(force: Bool = false, precise: Bool = false, rewatch: Bool = false, fix: Fix? = nil) {
+    func checkGeofences(force: Bool = false, precise: Bool = false, rewatch: Bool = false, fix: Fix? = nil, trigger: String = "refresh") {
         #if os(iOS)
         submit("geofences.check") { core in
-            await self.runCheck(core, force: force, precise: precise, rewatch: rewatch, fix: fix)
+            await self.runCheck(core, force: force, precise: precise, rewatch: rewatch, fix: fix, trigger: trigger)
         }
         #endif
     }
@@ -48,7 +48,7 @@ extension EngineHost {
         #if os(iOS)
         guard let core = current, core.locationActive else { return }
         Task { @MainActor in LocationService.shared.startInUseUpdates() }
-        checkGeofences()
+        checkGeofences(trigger: "open")
         #endif
     }
 
@@ -109,7 +109,8 @@ extension EngineHost {
     // MARK: - Work
 
     /// Android's CheckGeofencesWorker, with the fix from CoreLocation.
-    func runCheck(_ core: EngineCore, force: Bool, precise: Bool, rewatch: Bool, fix: Fix?, pushWakeDeadline: Date? = nil) async -> WorkOutcome {
+    func runCheck(_ core: EngineCore, force: Bool, precise: Bool, rewatch: Bool, fix: Fix?, pushWakeDeadline: Date? = nil, trigger: String = "refresh") async -> WorkOutcome {
+        applyTrackingMode(core)
         guard core.locationActive else { return .done }
         let (access, osWatches) = await MainActor.run { (LocationService.shared.access, LocationService.shared.osWatches) }
         guard access != .none else { return .done }
@@ -121,7 +122,16 @@ extension EngineHost {
             return .done
         }
 
-        let result = await core.checkGeofences(fix: current, force: force, rewatch: rewatch, osWatches: osWatches, pushWakeDeadline: pushWakeDeadline)
+        let permission: String
+        switch access {
+        case .none: permission = "none"
+        case .whenInUse: permission = "when_in_use"
+        case .always: permission = "always"
+        }
+        let result = await core.checkGeofences(
+            fix: current, force: force, rewatch: rewatch, osWatches: osWatches, pushWakeDeadline: pushWakeDeadline,
+            trigger: pushWakeDeadline != nil ? "push" : trigger, permission: permission
+        )
         if core.hasPendingTransitions { await sendTransitionsNow(core) }
         return result
     }
@@ -133,9 +143,49 @@ extension EngineHost {
             BubblEvents.shared.emit(transition.enter ? .geofenceEntered(locationId: transition.locationId) : .geofenceExited(locationId: transition.locationId))
         }
         if !outcome.transitions.isEmpty { await sendTransitionsNow(core) }
+        await followGeofence(outcome, core)
         guard outcome.refresh || outcome.needsFix else { return }
         let checked = await runCheck(core, force: outcome.refresh, precise: outcome.needsFix, rewatch: false, fix: outcome.needsFix ? nil : fix)
         if case .retry = checked { checkGeofences(force: outcome.refresh, precise: outcome.needsFix) }
+    }
+
+    /// An approach zone is entered and the device isn't in the geofence itself yet: run a live tracking session (TrackingSession),
+    /// for up to max_session_s, and end it when that isn't so (decided, zone left) or Bubbl isn't allowed to use location any more.
+    /// Without "Always" nothing runs: the re-check fixes are the fallback.
+    private func followGeofence(_ outcome: Outcome, _ core: EngineCore) async {
+        let (active, always) = await MainActor.run { (LocationService.shared.tracking, LocationService.shared.osWatches) }
+        var pending = outcome.needsFix
+        if !pending && active { pending = (try? await core.geofences.shapesPending()) == true }
+        switch TrackingSession.decide(active: active, pending: pending && core.locationActive, hasAlways: always) {
+        case .start:
+            let seconds = core.configSync.current?.approach.maxSessionSeconds ?? ApproachSettings.defaultMaxSessionSeconds
+            await MainActor.run { LocationService.shared.startTracking(maxSeconds: seconds) }
+        case .stop:
+            await MainActor.run { LocationService.shared.stopTracking(reason: "decided_or_left") }
+        case .needsAlways:
+            await MainActor.run { LocationService.shared.trackingNeedsAlways() }
+        case .keep, .idle:
+            break
+        }
+    }
+
+    /// Always-on tracking (BUB-442) follows the mode in force (the test-only override, else /config) and the permissions:
+    /// started with "Always", ended when the mode returns to zone or consent or "Always" is lost. Without "Always" it stays in zone mode.
+    func applyTrackingMode(_ core: EngineCore) {
+        let config = core.configSync.current
+        let mode = config?.trackingMode(forced: forcedTrackingMode) ?? forcedTrackingMode ?? .zone
+        let settings = config?.always ?? AlwaysSettings()
+        let locationActive = core.locationActive
+        Task { @MainActor in
+            let service = LocationService.shared
+            switch AlwaysTracking.decide(mode: mode, active: service.alwaysOn, locationActive: locationActive, hasAlways: service.access == .always) {
+            case .start: service.startAlwaysOn(settings)
+            case .keep: service.updateAlwaysOn(settings)
+            case .stop: service.stopAlwaysOn()
+            case .needsAlways: service.alwaysNeedsAlways()
+            case .idle: break
+            }
+        }
     }
 
     /// Send the saved transitions now; what couldn't go is retried, with backoff, as work.
@@ -147,7 +197,7 @@ extension EngineHost {
 
     private func sendTransitions(_ core: EngineCore) async -> WorkOutcome {
         let sent = await core.sendTransitions()
-        await arrived(sent.notifications, core)
+        await arrived(sent.notifications, core, location: sent.locations.first)
         if sent.recheck { checkGeofences(force: true) }
         return sent.outcome
     }

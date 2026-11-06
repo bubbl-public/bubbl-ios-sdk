@@ -11,7 +11,9 @@ import BubblCore
 enum SystemLog {
     private static let logger = Logger(subsystem: "tech.bubbl.sdk", category: "Bubbl")
 
-    static func use(_ level: BubblOptions.LogLevel) {
+    /// `remember`: keep the level for the next background wake, which runs before the app's own code has said it (BUB-436).
+    static func use(_ level: BubblOptions.LogLevel, remember: Bool = true) {
+        if remember { EngineHost.logLevelMemory()?.remember(level.rawValue) }
         let writes = level.core != nil
         BubblLog.setSink(level: level.core ?? .error) { level, message in
             if level == .error { BubblEvents.shared.emit(.error(message: message)) }

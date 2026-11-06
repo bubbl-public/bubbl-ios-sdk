@@ -44,6 +44,14 @@ final class LocationService: NSObject, CLLocationManagerDelegate {
     /// Which request for a fix is outstanding, so an earlier one's timeout can't end a later one.
     private var fixRequest = 0
     private var updatingInUse = false
+    /// A live tracking session runs (the device is in an approach zone but not in the geofence), until this time or until it's decided.
+    private var trackingUntil: Date?
+    /// Always-on tracking (BUB-442) runs, as these settings.
+    private var always: AlwaysSettings?
+    private var lastAlwaysFix: Date?
+    private let continuous = CLLocationManager()
+    private var backgroundSession: AnyObject?
+    private var liveUpdates: Task<Void, Never>?
     private var saidWhy: Set<String> = []
     /// The access last seen, so only a change is acted on (iOS reports it once at every launch too).
     private var knownAccess: LocationAccess?
@@ -54,10 +62,9 @@ final class LocationService: NSObject, CLLocationManagerDelegate {
     private var session: AnyObject?
 
     private static let fixTimeoutSeconds: UInt64 = 20
-
     override private init() {
         super.init()
-        for manager in [changes, oneShot, inUse] { manager.delegate = self }
+        for manager in [changes, oneShot, inUse, continuous] { manager.delegate = self }
         inUse.desiredAccuracy = kCLLocationAccuracyHundredMeters
         inUse.distanceFilter = 20
         inUse.pausesLocationUpdatesAutomatically = true
@@ -104,8 +111,9 @@ final class LocationService: NSObject, CLLocationManagerDelegate {
         return budget.capacity(othersVisible: others)
     }
 
-    /// Watch exactly `wanted` with "Always" (otherwise nothing: fixes decide while the app is
-    /// open), each radius between 100 m (iOS is unreliable below) and iOS's maximum.
+    /// Watch exactly `wanted` (the approach zones) with "Always" (otherwise nothing: fixes decide
+    /// while the app is open), each radius between 100 m (iOS is unreliable below; the engine's
+    /// own floor is higher) and iOS's maximum.
     func watch(_ wanted: [WatchedRegion]) async -> Bool {
         guard access == .always else {
             await stopWatching()
@@ -140,6 +148,8 @@ final class LocationService: NSObject, CLLocationManagerDelegate {
     }
 
     func stopAll() async {
+        stopAlwaysOn()
+        stopTracking(reason: "location_stopped")
         stopInUseUpdates()
         await stopWatching()
     }
@@ -226,6 +236,131 @@ final class LocationService: NSObject, CLLocationManagerDelegate {
         inUse.startUpdatingLocation()
     }
 
+    /// Whether a live tracking session is running.
+    var tracking: Bool { trackingUntil != nil }
+
+    /// The running session's id, for the geofence decision log.
+    private var trackingSessionId: String?
+
+    private func recordSession(_ result: String, event: String, reason: String?) {
+        EngineHost.shared.current?.decisionLog.record(GeofenceDecision(
+            regionId: GeofenceDecision.trackingRegion, event: event, result: result, reason: reason,
+            sessionId: trackingSessionId, tsMillis: Int64(Date().timeIntervalSince1970 * 1000)
+        ))
+    }
+
+    /// The device is in an approach zone but not in the geofence itself: iOS won't say when it gets there (it only relaunches the
+    /// app for the zone), so take precise fixes every second or so for up to `maxSeconds`, even with the app closed, and let the
+    /// engine decide from them: CLBackgroundActivitySession with CLLocationUpdate.liveUpdates, or, if that ends by itself,
+    /// startUpdatingLocation with background updates. Needs "Always", and "Location updates" in the app's background modes (without
+    /// it iOS suspends the app and the geofence is decided at the next wake). Ended by `stopTracking` (decided, zone left, no
+    /// permission), by the deadline, and with the rest.
+    func startTracking(maxSeconds: Int) {
+        guard osWatches, !updatingInUse, trackingUntil == nil else { return }
+        let until = Date().addingTimeInterval(TimeInterval(maxSeconds))
+        trackingUntil = until
+        trackingSessionId = UUID().uuidString.lowercased()
+        EngineHost.shared.current?.decisionLog.currentSessionId = trackingSessionId
+        recordSession("tracking_started", event: "enter", reason: nil)
+        let modes = Bundle.main.object(forInfoDictionaryKey: "UIBackgroundModes") as? [String] ?? []
+        if !modes.contains("location") {
+            explain("The location background mode is off: a small place is only noticed while the app is open or woken", key: "trackingBackground")
+        }
+        BubblLog.debug("Live tracking started for up to \(maxSeconds) s")
+        backgroundSession = CLBackgroundActivitySession()
+        liveUpdates = Task { @MainActor in
+            do {
+                for try await update in CLLocationUpdate.liveUpdates() {
+                    guard let location = update.location else { continue }
+                    EngineHost.shared.locationFix(Fix(location), osWatches: true)
+                }
+            } catch {
+                BubblLog.debug("Live updates failed: \(type(of: error))")
+            }
+            if !Task.isCancelled, self.trackingUntil == until { self.startClassicUpdates() }
+        }
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: UInt64(maxSeconds) * 1_000_000_000)
+            if self.trackingUntil == until { self.stopTracking(reason: "max_session") }
+        }
+    }
+
+    /// The fallback when live updates can't run.
+    private func startClassicUpdates() {
+        if (Bundle.main.object(forInfoDictionaryKey: "UIBackgroundModes") as? [String])?.contains("location") == true { inUse.allowsBackgroundLocationUpdates = true }
+        inUse.desiredAccuracy = kCLLocationAccuracyBest
+        inUse.distanceFilter = kCLDistanceFilterNone
+        inUse.startUpdatingLocation()
+    }
+
+    /// Something is decided but the session can't run without "Always": the re-check fixes (and the fixes while the app is open) do the job.
+    func trackingNeedsAlways() {
+        explain("Live tracking of a nearby place needs Always location access: it is noticed from the next fixes instead", key: "trackingNeedsAlways")
+    }
+
+    /// `reason` goes to the geofence decision log (decided_or_left, max_session, location_stopped).
+    func stopTracking(reason: String = "decided_or_left") {
+        guard trackingUntil != nil else { return }
+        recordSession("tracking_stopped", event: "exit", reason: reason)
+        EngineHost.shared.current?.decisionLog.currentSessionId = nil
+        trackingUntil = nil
+        trackingSessionId = nil
+        liveUpdates?.cancel()
+        liveUpdates = nil
+        (backgroundSession as? CLBackgroundActivitySession)?.invalidate()
+        backgroundSession = nil
+        inUse.stopUpdatingLocation()
+        inUse.allowsBackgroundLocationUpdates = false
+        inUse.desiredAccuracy = kCLLocationAccuracyHundredMeters
+        inUse.distanceFilter = 20
+        BubblLog.debug("Live tracking stopped")
+    }
+
+    // MARK: - Always-on tracking (BUB-442)
+
+    var alwaysOn: Bool { always != nil }
+
+    /// Continuous background location, as SDK 4: every fix goes to the engine, which decides circles and polygons. Needs "Always"
+    /// and "Location updates" in the app's background modes; significant changes stay on as the relaunch backstop.
+    func startAlwaysOn(_ settings: AlwaysSettings) {
+        guard always == nil, access == .always else { return }
+        always = settings
+        lastAlwaysFix = nil
+        let modes = Bundle.main.object(forInfoDictionaryKey: "UIBackgroundModes") as? [String] ?? []
+        if !modes.contains("location") {
+            explain("Always-on tracking needs the location background mode: without it iOS suspends the app", key: "alwaysBackground")
+        } else {
+            continuous.allowsBackgroundLocationUpdates = true
+        }
+        continuous.pausesLocationUpdatesAutomatically = false
+        continuous.desiredAccuracy = kCLLocationAccuracyBest
+        continuous.distanceFilter = CLLocationDistance(settings.distanceMeters)
+        continuous.startUpdatingLocation()
+        changes.startMonitoringSignificantLocationChanges()
+        holdSession()
+        BubblLog.info("Always-on tracking started")
+    }
+
+    /// New distance when the config changed it.
+    func updateAlwaysOn(_ settings: AlwaysSettings) {
+        guard always != nil, always != settings else { return }
+        always = settings
+        continuous.distanceFilter = CLLocationDistance(settings.distanceMeters)
+    }
+
+    func stopAlwaysOn() {
+        guard always != nil else { return }
+        always = nil
+        continuous.stopUpdatingLocation()
+        continuous.allowsBackgroundLocationUpdates = false
+        BubblLog.info("Always-on tracking stopped")
+    }
+
+    /// Wanted but the app doesn't have "Always": stays in zone mode.
+    func alwaysNeedsAlways() {
+        explain("Always-on tracking needs Always location access: staying in zone mode", key: "alwaysNeedsAlways")
+    }
+
     func stopInUseUpdates() {
         guard updatingInUse else { return }
         updatingInUse = false
@@ -242,8 +377,17 @@ final class LocationService: NSObject, CLLocationManagerDelegate {
         MainActor.assumeIsolated {
             if from == ObjectIdentifier(oneShot) {
                 deliver(fix)
+            } else if from == ObjectIdentifier(continuous) {
+                // At most one fix per interval_s is acted on.
+                guard let settings = always else { return }
+                let now = Date()
+                if let last = lastAlwaysFix, now.timeIntervalSince(last) < TimeInterval(settings.intervalSeconds) { return }
+                lastAlwaysFix = now
+                EngineHost.shared.locationFix(fix, osWatches: osWatches)
             } else if from == ObjectIdentifier(inUse) {
-                EngineHost.shared.locationFix(fix, osWatches: false)
+                // Taken by a live tracking session (iOS watches the geofences) or because it isn't watching.
+                if let until = trackingUntil, until < Date() { stopTracking(reason: "max_session") }
+                EngineHost.shared.locationFix(fix, osWatches: trackingUntil != nil && osWatches)
             } else {
                 // A significant change: fresher polygons, and whether to pick or fetch again (or,
                 // where iOS can't watch, whether a geofence was entered or left).
@@ -267,6 +411,7 @@ final class LocationService: NSObject, CLLocationManagerDelegate {
             defer { knownAccess = now }
             guard let before = knownAccess, before != now else { return }
             if now != .always { releaseSession() }
+            if now != .always { stopAlwaysOn() }
             if now == .none || osWatches { stopInUseUpdates() }
             EngineHost.shared.locationAccessChanged(now)
         }

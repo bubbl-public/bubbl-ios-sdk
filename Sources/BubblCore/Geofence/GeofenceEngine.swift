@@ -75,7 +75,7 @@ package struct Outcome: Sendable, Equatable {
     package var transitions: [Transition] = []
     /// The device has left the area its geofences were picked for: refresh now.
     package var refresh = false
-    /// A polygon's circle was entered without a fix good enough to check the polygon: get one.
+    /// An approach zone is entered and the device isn't in the geofence itself (yet, as far as a fix can tell): get a fresh fix, and again soon.
     package var needsFix = false
 
     package init(transitions: [Transition] = [], refresh: Bool = false, needsFix: Bool = false) {
@@ -90,7 +90,11 @@ package struct Outcome: Sendable, Equatable {
 /// transitions (checking polygons on the device), and sending them (POST /geofence-events). The
 /// same engine as Android's, with iOS's region budget.
 ///
-/// The OS watches the nearest geofences' circles, as many as the budget allows, plus one more
+/// The OS watches the nearest geofences' approach zones (a circle around each: the geofence's
+/// reach plus ApproachSettings.bufferMeters, at least minOsRadiusMeters), as many as the budget
+/// allows. Only the OS's word is "the device is near": the SDK decides inside and outside the
+/// geofence itself, circles and polygons alike, from precise fixes (a live tracking session takes
+/// them with the app closed). Plus one more
 /// around where the device was (REFRESH_REGION_ID): leaving it means picking again, and asking
 /// the server again once the device is refresh_distance_meters from where it last asked. When
 /// geofences had to be left out, that region stops short of the nearest one left out, so the
@@ -105,11 +109,11 @@ package final class GeofenceEngine: Sendable {
     /// can tell Bubbl's from the app's own and other SDKs' (iOS's 20 are shared).
     package static let regionPrefix = "bubbl."
     package static let refreshRegionId = regionPrefix + "refresh"
-    /// A fix vaguer than this can't place the device inside or outside a polygon.
+    /// A fix vaguer than this can't place the device inside or outside a polygon (nor a circle, but at maxCircleAccuracyMeters).
     package static let maxPolygonAccuracyMeters = 100.0
     /// …nor one older than this (iOS reports entering a region without a location, and the last
-    /// known one can be minutes old).
-    package static let maxPolygonFixAgeMillis: Int64 = 2 * 60 * 1000
+    /// known one can be minutes old; a walking device is 40 m on in 30 s).
+    package static let maxPolygonFixAgeMillis: Int64 = 30 * 1000
     /// …nor a circle, when the SDK decides entering and leaving itself.
     package static let maxCircleAccuracyMeters = 200.0
     /// The server keeps an Idempotency-Key's answer for a day; stop retrying before then.
@@ -121,7 +125,11 @@ package final class GeofenceEngine: Sendable {
     private let clock: ServerClock
     private let store: any GeofenceStateStore
     private let monitor: any RegionMonitor
+    private let approach: @Sendable () -> ApproachSettings
     private let newKey: @Sendable () -> String
+    private let deviceNowMillis: @Sendable () -> Int64
+    private let decisions: DecisionLog?
+    private let notes = DecisionNotes()
     private let stateLock = AsyncMutex()
     private let refreshing = AsyncMutex()
 
@@ -130,13 +138,19 @@ package final class GeofenceEngine: Sendable {
         clock: ServerClock,
         store: any GeofenceStateStore,
         monitor: any RegionMonitor,
-        newKey: @escaping @Sendable () -> String = { UUID().uuidString.lowercased() }
+        approach: @escaping @Sendable () -> ApproachSettings = { ApproachSettings() },
+        newKey: @escaping @Sendable () -> String = { UUID().uuidString.lowercased() },
+        deviceNowMillis: @escaping @Sendable () -> Int64 = { Int64(Date().timeIntervalSince1970 * 1000) },
+        decisions: DecisionLog? = nil
     ) {
+        self.decisions = decisions
         self.api = api
         self.clock = clock
         self.store = store
         self.monitor = monitor
+        self.approach = approach
         self.newKey = newKey
+        self.deviceNowMillis = deviceNowMillis
     }
 
     /// Fetch geofences for `fix` if there are none yet, the set is older than its
@@ -230,7 +244,7 @@ package final class GeofenceEngine: Sendable {
 
     private func watchSaved(around center: LatLng) async throws -> Bool {
         guard let set = try await stateLock.withLock({ try self.store.load().set }) else { return false }
-        let picked = Self.regions(set, around: center, capacity: await monitor.capacity(), excluding: await monitor.excluded())
+        let picked = Self.regions(set, around: center, capacity: await monitor.capacity(), excluding: await monitor.excluded(), approach: approach())
         let watched = await monitor.watch(picked.regions)
 
         try await stateLock.withLock {
@@ -276,40 +290,61 @@ package final class GeofenceEngine: Sendable {
 
                 if entered {
                     guard !state.insideCircles.contains(id) else { continue }
+                    // The OS only says the device is near: the geofence itself is decided from precise fixes below.
                     state.insideCircles.insert(id)
-                    if !geofence.isPolygon {
-                        if geofence.reportsEnter { outcome.transitions.append(self.transition(geofence, enter: true, deviceTimeMillis, fix)) }
-                    } else if fix.map({ Self.canCheckPolygon($0, at: deviceTimeMillis) }) != true {
-                        outcome.needsFix = true
+                    notes.forget(id)
+                    self.note(id, "enter", "approach_zone_entered", fix: fix, at: deviceTimeMillis, attempt: nil)
+                    if let fix, !Self.isFresh(fix, at: deviceTimeMillis) {
+                        self.note(id, "enter", "fix_unusable", reason: "stale_fix", fix: fix, at: deviceTimeMillis)
+                    } else if fix == nil {
+                        self.note(id, "enter", "fix_unusable", reason: "no_fix", fix: nil, at: deviceTimeMillis)
                     }
                 } else {
                     guard state.insideCircles.contains(id) else { continue }
                     state.insideCircles.remove(id)
-                    let wasInside = !geofence.isPolygon || state.insidePolygons.contains(id)
+                    let wasInside = state.insidePolygons.contains(id)
                     state.insidePolygons.remove(id)
+                    notes.forget(id)
+                    self.note(id, "exit", wasInside ? "left_geofence" : "left_approach_zone", reason: wasInside && !geofence.reportsExit ? "trigger_not_exit" : nil, fix: fix, at: deviceTimeMillis, attempt: nil)
                     if wasInside && geofence.reportsExit { outcome.transitions.append(self.transition(geofence, enter: false, deviceTimeMillis, fix)) }
                 }
             }
 
-            // Polygons whose circle the device is in are checked against the fix, if it's good enough.
-            if let fix, Self.canCheckPolygon(fix, at: deviceTimeMillis) {
-                self.checkPolygons(&state, byId, fix, deviceTimeMillis, &outcome.transitions)
+            // Geofences whose approach zone the device is in are checked against the fix, if it's fresh and good enough.
+            if let fix, Self.isFresh(fix, at: deviceTimeMillis) {
+                self.checkShapes(&state, byId, fix, deviceTimeMillis, &outcome.transitions)
             }
 
             try self.store.save(state)
+            // The fix that woke the app is from the zone's edge, so it says "not there yet": nothing
+            // else looks again while the app is closed, so ask for fresh fixes until the device is in or out.
+            if Self.hasPending(state, byId) { outcome.needsFix = true }
             return outcome
         }
     }
 
-    /// A location fix from anywhere (significant changes, a fix asked for): re-checks polygons.
+    /// Whether the device is in an approach zone but not (as last checked) in the geofence itself: still to be decided.
+    package func shapesPending() async throws -> Bool {
+        try await stateLock.withLock {
+            let state = try self.store.load()
+            return Self.hasPending(state, Dictionary((state.set?.geofences ?? []).map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first }))
+        }
+    }
+
+    private static func hasPending(_ state: GeofenceState, _ byId: [String: Geofence]) -> Bool {
+        state.insideCircles.contains { byId[$0] != nil && !state.insidePolygons.contains($0) }
+    }
+
+    /// A location fix from anywhere (significant changes, live tracking, a fix asked for): re-checks the geofences in reach.
     package func onFix(_ fix: Fix) async throws -> Outcome {
         try await stateLock.withLock {
             var state = try self.store.load()
             guard let set = state.set else { return Outcome(refresh: true) }
             var transitions: [Transition] = []
 
-            if Self.canCheckPolygon(fix, at: fix.timeMillis) {
-                self.checkPolygons(&state, Dictionary(set.geofences.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first }), fix, fix.timeMillis, &transitions)
+            // Judged against now, not the fix's own time (which would make every fix look fresh).
+            if Self.isFresh(fix, at: self.deviceNowMillis()) {
+                self.checkShapes(&state, Dictionary(set.geofences.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first }), fix, fix.timeMillis, &transitions)
                 try self.store.save(state)
             }
             // Leaving the watch region is also caught here: significant-change fixes back up a
@@ -405,21 +440,21 @@ package final class GeofenceEngine: Sendable {
     package func watchedRegions() async throws -> [WatchedRegion] {
         let state = try await stateLock.withLock { try self.store.load() }
         guard let set = state.set else { return [] }
-        return Self.regions(set, around: state.watchCenter ?? set.origin, capacity: await monitor.capacity(), excluding: await monitor.excluded()).regions
+        return Self.regions(set, around: state.watchCenter ?? set.origin, capacity: await monitor.capacity(), excluding: await monitor.excluded(), approach: approach()).regions
     }
 
     /// The geofences whose edges are nearest `center`, as many as fit in `capacity`, plus the
     /// refresh region. When some are left out, the refresh region stops short of the nearest
     /// edge among them, so the device picks again before it could reach one unwatched. Region
     /// names in `excluding` (ones the OS can't watch) are passed over for the next nearest.
-    package static func regions(_ set: GeofenceSet, around center: LatLng, capacity: Int, excluding: Set<String> = []) -> (regions: [WatchedRegion], radius: Double?) {
+    package static func regions(_ set: GeofenceSet, around center: LatLng, capacity: Int, excluding: Set<String> = [], approach: ApproachSettings = ApproachSettings()) -> (regions: [WatchedRegion], radius: Double?) {
         guard capacity > 0 else { return ([], nil) }
 
-        // Distance to the edge, not the centre: a big geofence far off can be closer than a
-        // small one nearby.
+        // Distance to the edge of the approach zone the OS watches, not the centre: a big zone far
+        // off can be closer than a small one nearby.
         let byEdge = set.geofences
             .filter { !excluding.contains(regionId(for: $0.id)) }
-            .map { (geofence: $0, edge: max(0, Geo.distanceMeters(center, $0.center) - Double($0.radiusMeters))) }
+            .map { (geofence: $0, edge: max(0, Geo.distanceMeters(center, $0.center) - approach.osRadiusMeters($0))) }
             .sorted { ($0.edge, $0.geofence.id) < ($1.edge, $1.geofence.id) }
         let kept = byEdge.prefix(capacity - 1)
         let leftOut = byEdge.dropFirst(kept.count)
@@ -429,22 +464,47 @@ package final class GeofenceEngine: Sendable {
             radius = min(radius, max(minWatchRadiusMeters, nearestLeftOut))
         }
 
-        let regions = kept.map { WatchedRegion(regionId(for: $0.geofence.id), $0.geofence.center, Double($0.geofence.radiusMeters)) }
+        let regions = kept.map { WatchedRegion(regionId(for: $0.geofence.id), $0.geofence.center, approach.osRadiusMeters($0.geofence)) }
         return (regions + [WatchedRegion(refreshRegionId, center, radius)], radius)
     }
 
-    private func checkPolygons(_ state: inout GeofenceState, _ byId: [String: Geofence], _ fix: Fix, _ deviceTimeMillis: Int64, _ transitions: inout [Transition]) {
+    /// Decides every geofence whose approach zone the device is in from `fix` (see Geofence.insideAt).
+    private func checkShapes(_ state: inout GeofenceState, _ byId: [String: Geofence], _ fix: Fix, _ deviceTimeMillis: Int64, _ transitions: inout [Transition]) {
         for id in state.insideCircles.sorted() {
-            guard let geofence = byId[id], let ring = geofence.polygon else { continue }
-            let nowInside = Geo.contains(ring, fix.position)
-            if nowInside && !state.insidePolygons.contains(id) {
+            guard let geofence = byId[id] else { continue }
+            let attempt = notes.nextAttempt(id)
+            guard let nowInside = geofence.insideAt(fix, wasInside: state.insidePolygons.contains(id), maxPolygonAccuracy: Self.maxPolygonAccuracyMeters, maxCircleAccuracy: Self.maxCircleAccuracyMeters) else {
+                // Too vague (or, for a device inside, not clearly outside): still to be decided.
+                let vague = fix.accuracyMeters == nil ? "no_accuracy" : "fix_too_vague"
+                note(id, "enter", "fix_unusable", reason: vague, fix: fix, at: deviceTimeMillis, attempt: attempt)
+                continue
+            }
+            let was = state.insidePolygons.contains(id)
+            let result = nowInside ? (geofence.isPolygon ? "inside_polygon" : "circle_only") : (geofence.isPolygon ? "outside_polygon" : "outside_circle")
+            if nowInside && !was {
                 state.insidePolygons.insert(id)
+                note(id, "enter", result, reason: geofence.reportsEnter ? nil : "trigger_not_enter", fix: fix, at: deviceTimeMillis, attempt: attempt)
                 if geofence.reportsEnter { transitions.append(transition(geofence, enter: true, deviceTimeMillis, fix)) }
-            } else if !nowInside && state.insidePolygons.contains(id) {
+            } else if !nowInside && was {
                 state.insidePolygons.remove(id)
+                note(id, "exit", result, reason: geofence.reportsExit ? nil : "trigger_not_exit", fix: fix, at: deviceTimeMillis, attempt: attempt)
                 if geofence.reportsExit { transitions.append(transition(geofence, enter: false, deviceTimeMillis, fix)) }
+            } else if !nowInside {
+                // Near but not there (yet): the re-check that follows decides.
+                note(id, "enter", result, reason: "not_inside_yet", fix: fix, at: deviceTimeMillis, attempt: attempt)
             }
         }
+    }
+
+    /// Writes one step of the decision log, unless it says what the last one for this geofence did
+    /// (a tracking session takes a fix a second: the buffer keeps the changes, not the repeats).
+    private func note(_ id: String, _ event: String, _ result: String, reason: String? = nil, fix: Fix?, at deviceTimeMillis: Int64, attempt: Int? = nil) {
+        guard let decisions, notes.changed(id, "\(event) \(result) \(reason ?? "")") else { return }
+        decisions.record(GeofenceDecision(
+            regionId: id, event: event, result: result, reason: reason,
+            fixAgeMs: fix.map { deviceTimeMillis - $0.timeMillis }, fixAccuracyM: fix?.accuracyMeters,
+            recheckAttempt: attempt, tsMillis: deviceNowMillis()
+        ))
     }
 
     private func markStale() async throws {
@@ -473,16 +533,46 @@ package final class GeofenceEngine: Sendable {
         return Geo.distanceMeters(center, fix.position) - accuracy >= radius
     }
 
-    /// Whether `fix` can say which side of a polygon's edge the device is: precise enough, and
-    /// taken no more than maxPolygonFixAgeMillis before `deviceTimeMillis` (nor after it).
-    private static func canCheckPolygon(_ fix: Fix, at deviceTimeMillis: Int64) -> Bool {
+    /// Whether `fix` was taken no more than maxPolygonFixAgeMillis before `deviceTimeMillis` (nor
+    /// after it); how precise it must be depends on the geofence (Geofence.insideAt).
+    private static func isFresh(_ fix: Fix, at deviceTimeMillis: Int64) -> Bool {
         let age = deviceTimeMillis - fix.timeMillis
-        return (fix.accuracyMeters ?? .greatestFiniteMagnitude) <= maxPolygonAccuracyMeters &&
-            age >= 0 && age <= maxPolygonFixAgeMillis
+        return age >= 0 && age <= maxPolygonFixAgeMillis
     }
 
     /// Six decimal places is about 10 cm.
     private static func coordinate(_ value: Double) -> String {
         String(format: "%.6f", value)
+    }
+}
+
+
+/// What the decision log last said per geofence, and how many times each geofence's polygon has
+/// been checked since its approach zone was entered (the re-check attempt, 0 for the first).
+private final class DecisionNotes: @unchecked Sendable {
+    private let lock = NSLock()
+    private var last: [String: String] = [:]
+    private var attempts: [String: Int] = [:]
+
+    func changed(_ id: String, _ line: String) -> Bool {
+        lock.sync {
+            if last[id] == line { return false }
+            last[id] = line
+            return true
+        }
+    }
+
+    func nextAttempt(_ id: String) -> Int {
+        lock.sync {
+            defer { attempts[id, default: 0] += 1 }
+            return attempts[id, default: 0]
+        }
+    }
+
+    func forget(_ id: String) {
+        lock.sync {
+            last[id] = nil
+            attempts[id] = nil
+        }
     }
 }
