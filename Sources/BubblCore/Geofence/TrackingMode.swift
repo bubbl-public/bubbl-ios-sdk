@@ -58,6 +58,13 @@ package enum AlwaysTracking {
     }
 }
 
+/// Significant-change monitoring is the relaunch backstop (with the CLMonitor geofences) whenever Bubbl may use location and the app
+/// has "Always". It is registered at every launch, before any fix: iOS requires a relaunched app to register it again, and a launch
+/// with no fix never reaches the geofence check that does it too (BUB-449).
+package enum RelaunchBackstop {
+    package static func shouldRegister(locationActive: Bool, hasAlways: Bool) -> Bool { locationActive && hasAlways }
+}
+
 extension SdkConfig {
     /// geofencing.mode, "zone" unless the config says "always".
     package func trackingMode(forced: TrackingMode? = nil) -> TrackingMode { TrackingMode.resolve(forced: forced, json["geofencing"]) }

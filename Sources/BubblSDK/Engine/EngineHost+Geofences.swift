@@ -31,6 +31,12 @@ extension EngineHost {
         #endif
     }
 
+    func registerRelaunchBackstop(locationActive: Bool) {
+        #if os(iOS)
+        Task { @MainActor in LocationService.shared.registerRelaunchBackstop(locationActive: locationActive) }
+        #endif
+    }
+
     /// Check the geofences soon: fetch them if due (or `force`), from `fix` or a fresh one
     /// (`precise` for a polygon), watching them again first if `rewatch`. A check asked for while
     /// one runs replaces any other waiting.

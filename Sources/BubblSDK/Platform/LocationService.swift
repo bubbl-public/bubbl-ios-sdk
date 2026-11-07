@@ -81,6 +81,13 @@ final class LocationService: NSObject, CLLocationManagerDelegate {
         Task { await ConditionWatcher.shared.listen() }
     }
 
+    /// A launch of any kind (the OS's relaunch included): iOS delivers no more significant changes until they are registered again,
+    /// whether or not a fix or a geofence check follows.
+    func registerRelaunchBackstop(locationActive: Bool) {
+        guard RelaunchBackstop.shouldRegister(locationActive: locationActive, hasAlways: access == .always) else { return }
+        changes.startMonitoringSignificantLocationChanges()
+    }
+
     var access: LocationAccess {
         switch changes.authorizationStatus {
         case .authorizedAlways where changes.accuracyAuthorization == .fullAccuracy: return .always

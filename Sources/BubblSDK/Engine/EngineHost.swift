@@ -175,6 +175,7 @@ final class EngineHost: @unchecked Sendable {
     /// Location, push and the app's comings and goings, then whatever work the engine may do.
     private func run(_ core: EngineCore, launchFinished: Bool) {
         startLocation()
+        registerRelaunchBackstop(locationActive: core.locationActive)
         #if os(iOS)
         PushIntegration.installWhenLaunched(launchFinished: launchFinished)
         refreshPermissions()
